@@ -150,3 +150,39 @@ fn bucket_assignments_follow_hand_strength() {
     // OOP's four hand classes (AA, KK set, QQ, AK pair) cannot share one bucket.
     assert!(maps[0].iter().max() > maps[0].iter().min());
 }
+
+#[test]
+fn river_buckets_on_a_flop_tree_only_bucket_river_boards() {
+    // Regression: river-only bucketing used to give turn decisions zero
+    // buckets, which panicked with an index out of bounds.
+    let flop = board(&["2h", "7h", "9h"]);
+    let dead = set_from_cards(&flop);
+    for suit_isomorphism in [false, true] {
+        let cfg = GameConfig {
+            board: flop.clone(),
+            pot: Chips::whole(100),
+            effective_stack: Chips::whole(50),
+            bet_sizes: vec![1.0],
+            max_raises: 0,
+            suit_isomorphism,
+        };
+        let combos = [
+            Range::parse("AA,KK").unwrap().combos(dead),
+            Range::parse("QQ,AKs").unwrap().combos(dead),
+        ];
+        let options = TrainerOptions {
+            abstraction: CardAbstraction {
+                river: Some(2),
+                ..CardAbstraction::default()
+            },
+            ..TrainerOptions::default()
+        };
+        let mut trainer =
+            Trainer::new(build_tree(&cfg).unwrap(), flop.clone(), combos, options).unwrap();
+        trainer.train(2);
+        assert!(trainer.exploitability().total.is_finite());
+        let assignments = trainer.game().bucket_assignments();
+        assert!(!assignments.is_empty());
+        assert!(assignments.iter().all(|(board, _)| board.len() == 5));
+    }
+}

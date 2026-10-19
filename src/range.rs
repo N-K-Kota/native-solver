@@ -108,7 +108,7 @@ impl Range {
             }
             let (hand, weight) = match token.split_once(':') {
                 Some((h, w)) => (
-                    h,
+                    h.trim(),
                     w.trim()
                         .parse::<f64>()
                         .map_err(|_| RangeError::InvalidWeight {
@@ -333,6 +333,14 @@ mod tests {
         assert_eq!(range.get_weight("AKo"), 0.5);
         assert_eq!(range.get_weight("72o"), 0.25);
         assert_eq!(range.get_weight("KK"), 0.0);
+    }
+
+    #[test]
+    fn whitespace_around_the_weight_separator_is_ignored() {
+        let range = Range::parse("AA : 0.5, AKs :0.25,QJo: 0.75").unwrap();
+        assert_eq!(range.get_weight("AA"), 0.5);
+        assert_eq!(range.get_weight("AKs"), 0.25);
+        assert_eq!(range.get_weight("QJo"), 0.75);
     }
 
     #[test]

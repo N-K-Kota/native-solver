@@ -209,8 +209,9 @@ pub enum TrainerError {
     NoCompatibleDeals,
     /// A [`CardAbstraction`] street asks for zero buckets.
     ZeroBuckets,
-    /// The tree groups chance cards by suit isomorphism, but a range is not
-    /// closed under the board's free-suit swaps with equal weights.
+    /// A range is not closed under the initial board's free-suit swaps. This
+    /// is required when the tree groups chance cards by suit isomorphism (with
+    /// equal weights for swapped combos) or when flop or turn buckets are on.
     AsymmetricRange {
         /// The player whose range is asymmetric.
         player: Player,
@@ -247,7 +248,7 @@ impl std::fmt::Display for TrainerError {
             Self::ZeroBuckets => write!(f, "card abstraction bucket counts must be positive"),
             Self::AsymmetricRange { player } => write!(
                 f,
-                "{player:?} range must be suit-symmetric when the tree uses suit isomorphism"
+                "{player:?} range must be suit-symmetric for suit isomorphism or flop/turn buckets"
             ),
         }
     }
@@ -320,9 +321,15 @@ fn validate_trainer_inputs(
     if [abstraction.flop, abstraction.turn, abstraction.river].contains(&Some(0)) {
         return Err(TrainerError::ZeroBuckets);
     }
-    if has_suit_reduction(&tree.root) {
-        // Later boards only remove free suits, so symmetry under the initial
-        // board's free-suit swaps covers every reduced chance node.
+    // Suit-reduced trees derive non-representative runouts by relabeling, so
+    // swapped combos must exist with equal weights. Flop and turn buckets
+    // average scores over suit-grouped runouts (`avg_score`), which only needs
+    // the swapped combos to exist. Later boards only remove free suits, so
+    // the initial board's free-suit swaps cover every reachable board.
+    let reduced = has_suit_reduction(&tree.root);
+    let averaged_buckets = (abstraction.flop.is_some() && initial_board.len() == 3)
+        || (abstraction.turn.is_some() && initial_board.len() <= 4);
+    if reduced || averaged_buckets {
         let free: Vec<u8> = (0..4)
             .filter(|&s| !initial_board.iter().any(|&c| suit(c) == s))
             .collect();
@@ -336,7 +343,11 @@ fn validate_trainer_inputs(
                     for combo in &combos[p] {
                         let [a, b] = combo.cards;
                         let swapped = normalize_pair(swap_suit(a, sa, sb), swap_suit(b, sa, sb));
-                        if weights.get(&swapped) != Some(&combo.weight) {
+                        let symmetric = match weights.get(&swapped) {
+                            Some(&weight) => !reduced || weight == combo.weight,
+                            None => false,
+                        };
+                        if !symmetric {
                             return Err(TrainerError::AsymmetricRange { player });
                         }
                     }
@@ -617,7 +628,9 @@ impl Trainer {
 
         let mut bucket_maps: HashMap<Vec<Card>, [Vec<usize>; 2]> = HashMap::new();
         if let Some(n) = abstraction.river {
-            for (board, scores) in &board_eval_cache {
+            // The cache also holds turn boards (with empty scores); bucketing
+            // those would give turn decisions zero buckets.
+            for (board, scores) in board_eval_cache.iter().filter(|(b, _)| b.len() == 5) {
                 let scores_f64 = [
                     scores[0].iter().map(|&s| s as f64).collect::<Vec<f64>>(),
                     scores[1].iter().map(|&s| s as f64).collect::<Vec<f64>>(),

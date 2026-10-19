@@ -416,3 +416,49 @@ fn errors_explain_what_is_wrong() {
         "Oop range has no combo with positive weight"
     );
 }
+
+#[test]
+fn flop_and_turn_buckets_need_suit_closed_ranges() {
+    // Regression: flop/turn buckets average over suit-grouped runouts, so a
+    // range missing a suit-swapped combo used to panic in `Trainer::new`.
+    let flop = board(&["2h", "7h", "9h"]);
+    let cfg = config(flop.clone());
+    let new = |oop: Vec<Combo>, abstraction: CardAbstraction| {
+        let ip = combos("AA", "QQ", &flop)[1].clone();
+        Trainer::new(
+            build_tree(&cfg).unwrap(),
+            flop.clone(),
+            [oop, ip],
+            TrainerOptions {
+                abstraction,
+                ..TrainerOptions::default()
+            },
+        )
+    };
+    let flop_buckets = CardAbstraction {
+        flop: Some(2),
+        ..CardAbstraction::default()
+    };
+    let turn_buckets = CardAbstraction {
+        turn: Some(2),
+        ..CardAbstraction::default()
+    };
+    for abstraction in [flop_buckets, turn_buckets] {
+        assert_eq!(
+            new(vec![combo("As", "Ks", 1.0)], abstraction).err(),
+            Some(TrainerError::AsymmetricRange {
+                player: Player::Oop
+            })
+        );
+    }
+
+    // Unequal weights are fine without a suit-reduced tree: only the swapped
+    // combos have to exist.
+    let mut oop = combos("AKs", "QQ", &flop)[0].clone();
+    oop[0].weight = 0.25;
+    let mut trainer = new(oop.clone(), flop_buckets).unwrap();
+    trainer.train(1);
+
+    // Without flop/turn buckets the same range needs no symmetry.
+    assert!(new(vec![combo("As", "Ks", 1.0)], CardAbstraction::default()).is_ok());
+}
