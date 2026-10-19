@@ -39,6 +39,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release --examples
+      # Example-local tests are not run by `cargo test`; this one guards the
+      # flop-dry fixture's tree size against the reference-audit work limit.
+      - run: cargo test --locked --release --example solver_performance
       - run: cargo run --locked --release --example bucket_speedup
       - run: cargo run --locked --release --example iso_speedup
       - run: cargo run --locked --release --example flop_turn_bucket_speedup
