@@ -1,0 +1,22 @@
+[package]
+name = "native-solver"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+description = "Heads-up postflop No-Limit Hold'em solver: hand evaluator, ranges, betting trees, and combo-vectorized CFR / CFR+ / DCFR."
+repository = "https://github.com/N-K-Kota/native-solver"
+readme = "README.md"
+keywords = ["poker", "solver", "cfr", "game-theory", "holdem"]
+categories = ["algorithms", "games", "simulation"]
+exclude = ["/.github"]
+
+[dependencies]
+rayon = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "eval_bench"
+harness = false

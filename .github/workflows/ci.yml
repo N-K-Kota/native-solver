@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Includes the README doctest and the exhaustive evaluator comparison.
+      - run: cargo test --locked --release
+
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release --examples
+      - run: cargo run --locked --release --example bucket_speedup
+      - run: cargo run --locked --release --example iso_speedup
+      - run: cargo run --locked --release --example flop_turn_bucket_speedup
+      # Fixed iteration counts keep the benchmark short; its default target
+      # mode exits 2 when the cap is reached before convergence.
+      - run: >-
+          cargo run --locked --release --example solver_performance --
+          --workload all --fixed-iterations --iterations 100 --check-every 50
+      - run: >-
+          cargo run --locked --release --example solver_performance --
+          --workload river-narrow --fixed-iterations --iterations 200 --check-every 100
+          --reference-check
+      - run: >-
+          cargo run --locked --release --example solver_performance --
+          --workload flop-dry --fixed-iterations --iterations 5 --check-every 5
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --lib
