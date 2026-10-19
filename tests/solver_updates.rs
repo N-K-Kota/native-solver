@@ -338,3 +338,74 @@ fn every_algorithm_converges_to_known_kuhn_value_and_policy() {
         }
     });
 }
+
+#[test]
+fn bucket_average_ignores_combos_blocked_by_the_dealt_card() {
+    // Regression: with card abstraction, combos holding the dealt river card
+    // were zeroed for regret weighting but still added their reach to the
+    // bucket's average strategy. OOP holds KcKd (weight 1) and QsQh (weight
+    // 0), sharing one river bucket. After the Kc river only QsQh is possible
+    // and it has zero reach, so no reach may enter that bucket's average:
+    // it must stay uniform.
+    let turn = ["2h", "7c", "9d", "Jc"].map(card).to_vec();
+    let tree = build_tree(&GameConfig {
+        board: turn.clone(),
+        pot: Chips::whole(100),
+        effective_stack: Chips::whole(100),
+        bet_sizes: vec![1.0],
+        max_raises: 0,
+        suit_isomorphism: false,
+    })
+    .unwrap();
+    let combos = [
+        vec![
+            Combo::new(card("Kc"), card("Kd"), 1.0),
+            Combo::new(card("Qs"), card("Qh"), 0.0),
+        ],
+        vec![Combo::new(card("As"), card("Ah"), 1.0)],
+    ];
+    let options = TrainerOptions {
+        abstraction: CardAbstraction {
+            river: Some(1),
+            ..CardAbstraction::default()
+        },
+        ..TrainerOptions::default()
+    };
+    let mut trainer = Trainer::new(tree, turn.clone(), combos, options).unwrap();
+    trainer.train(50);
+
+    fn river_decisions(node: &Node, out: &mut Vec<usize>) {
+        match node {
+            Node::Decision { id, children, .. } => {
+                out.push(*id);
+                children
+                    .iter()
+                    .for_each(|child| river_decisions(child, out));
+            }
+            Node::Chance { children } => children
+                .iter()
+                .for_each(|(_, child)| river_decisions(child, out)),
+            Node::Terminal(_) => {}
+        }
+    }
+    let mut ids = Vec::new();
+    river_decisions(trainer.game().tree(), &mut ids);
+    let kc_river: Vec<usize> = ids
+        .into_iter()
+        .filter(|&id| trainer.game().node_board(id).get(4) == Some(&card("Kc")))
+        .collect();
+    assert!(!kc_river.is_empty());
+    let mut checked_oop = false;
+    for id in kc_river {
+        let strategy = trainer.average_strategy(id);
+        if strategy[0].len() != 2 {
+            continue; // an IP node
+        }
+        checked_oop = true;
+        let uniform = 1.0 / strategy.len() as f64;
+        for row in &strategy {
+            assert_eq!(row[1], uniform, "node {id}: {strategy:?}");
+        }
+    }
+    assert!(checked_oop);
+}

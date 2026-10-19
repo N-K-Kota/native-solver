@@ -109,7 +109,9 @@ impl Trainer {
                                 1.0 / bucket_size[b] as f64
                             };
                             regret_delta[b] += weight * delta;
-                            data.strategy_sum[a][b] += reach[p][i] * strategy[a][b];
+                            // Mirrors the production fix: board-blocked combos
+                            // add no reach to the bucket average.
+                            data.strategy_sum[a][b] += effective_reach[i] * strategy[a][b];
                         }
                         for (b, delta) in regret_delta.iter().enumerate() {
                             data.regret_sum[a][b] = update.regret(data.regret_sum[a][b], *delta);

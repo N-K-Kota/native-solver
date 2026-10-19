@@ -996,7 +996,10 @@ impl Trainer {
                 // terminal CFVs already exclude impossible private deals.
                 // Do not infer this from bucket counts: tied scores can leave
                 // holes in a map while still sharing a bucket.
+                // Board-dead combos add no average-strategy mass, matching the
+                // bucketed path's `effective_reach` below.
                 if self.bucket_maps.is_empty() {
+                    let board_set = set_from_cards(board);
                     let mut data = self.node_data[*id].lock().unwrap();
                     for (a, cfv) in child_cfvs.iter().enumerate() {
                         for (i, &own) in cfv[p].iter().enumerate() {
@@ -1005,7 +1008,9 @@ impl Trainer {
                             let delta = 0.0 + (own - own_cfv[i]);
                             data.regret_sum[a][i] =
                                 pass.update.regret(data.regret_sum[a][i], delta);
-                            data.strategy_sum[a][i] += reach[p][i] * strategy[a][i];
+                            if !self.combos[p][i].conflicts_with(board_set) {
+                                data.strategy_sum[a][i] += reach[p][i] * strategy[a][i];
+                            }
                             data.strategy_sum[a][i] =
                                 pass.update.strategy_sum(data.strategy_sum[a][i]);
                         }
@@ -1020,9 +1025,9 @@ impl Trainer {
                 // `effective_reach` treats a combo whose hole card physically
                 // conflicts with `board` (impossible on this specific
                 // runout — see `eval_combos_if_complete`'s doc comment) as
-                // reach 0 *only* for the bucket-merge weighting below, so a
-                // phantom combo sharing a bucket with a real one can never
-                // skew the real combo's learned regret. When every combo is
+                // reach 0 for the bucket-merge weighting and the strategy
+                // sum below, so a phantom combo sharing a bucket with a real
+                // one can never skew the real combo's regret or average. When every combo is
                 // its own bucket (unabstracted, or `river_buckets` capped to
                 // a bijection) each bucket's total is either that one
                 // combo's own reach or — if masked or genuinely zero — falls
@@ -1063,7 +1068,7 @@ impl Trainer {
                                 1.0 / bucket_size[b] as f64
                             };
                             regret_delta[b] += weight * delta;
-                            data.strategy_sum[a][b] += reach[p][i] * strategy[a][b];
+                            data.strategy_sum[a][b] += effective_reach[i] * strategy[a][b];
                         }
                         for (b, delta) in regret_delta.iter().enumerate() {
                             data.regret_sum[a][b] =
