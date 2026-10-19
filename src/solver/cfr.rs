@@ -164,8 +164,9 @@ pub enum TrainerError {
     TreeBoardMismatch,
     /// The tree is malformed: decision ids are not exactly
     /// `0..num_decision_nodes`, actions and children differ in length, a
-    /// chance node does not deal every undealt card exactly once, or a
-    /// terminal investment is negative or not finite.
+    /// chance node does not deal every undealt card exactly once or groups
+    /// cards that are not suit swaps of each other, or a terminal investment
+    /// is negative or not finite.
     InvalidTree {
         /// What was wrong.
         reason: &'static str,
@@ -400,6 +401,19 @@ fn validate_tree(
                     }
                     dealt |= 1u64 << card;
                     count += 1;
+                }
+                // Grouped cards are derived from `members[0]` by swapping two
+                // suits, which is only a symmetry when both suits are off the
+                // board and the ranks match.
+                if members.len() > 1
+                    && members.iter().any(|&card| {
+                        rank(card) != rank(members[0])
+                            || board.iter().any(|&b| suit(b) == suit(card))
+                    })
+                {
+                    return invalid(
+                        "chance classes must group one rank in suits absent from the board",
+                    );
                 }
             }
             if count != 52 - board.len() {

@@ -462,3 +462,74 @@ fn flop_and_turn_buckets_need_suit_closed_ranges() {
     // Without flop/turn buckets the same range needs no symmetry.
     assert!(new(vec![combo("As", "Ks", 1.0)], CardAbstraction::default()).is_ok());
 }
+
+#[test]
+fn trainer_rejects_chance_groups_that_are_not_suit_swaps() {
+    // Regression: a hand-built group like [Ks, Kc] on a board with clubs used
+    // to pass `Trainer::new` and then panic in training.
+    let turn = board(&["2h", "7c", "9d", "Jc"]);
+    let c = |s: &str| card_from_str(s).unwrap();
+    let chance_tree = |groups: &[&[&str]]| {
+        let grouped: Vec<Card> = groups.iter().flat_map(|g| g.iter().map(|s| c(s))).collect();
+        let mut children: Vec<(Vec<Card>, Node)> = groups
+            .iter()
+            .map(|g| (g.iter().map(|s| c(s)).collect(), showdown()))
+            .collect();
+        let dead = set_from_cards(&turn) | set_from_cards(&grouped);
+        children.extend(
+            (0..52u8)
+                .filter(|&card| dead & (1 << card) == 0)
+                .map(|card| (vec![card], showdown())),
+        );
+        Tree {
+            root: Node::Chance { children },
+            num_decision_nodes: 0,
+        }
+    };
+    let new = |tree| {
+        Trainer::new(
+            tree,
+            turn.clone(),
+            combos("77,88,AKs", "77,88,AKs", &turn),
+            TrainerOptions::default(),
+        )
+    };
+
+    // Clubs are on the board, and Ks/Qs differ in rank.
+    for bad in [&[&["Ks", "Kc"][..]][..], &[&["Ks", "Qs"][..]][..]] {
+        let error = new(chance_tree(bad)).err();
+        assert!(
+            matches!(error, Some(TrainerError::InvalidTree { .. })),
+            "{bad:?}: {error:?}"
+        );
+    }
+
+    // On a monotone heart flop, spades, diamonds, and clubs are all free, so
+    // grouping the three non-heart kings is a legal suit-swap class.
+    let flop = board(&["2h", "7h", "9h"]);
+    let flop_tree = {
+        let dead = set_from_cards(&flop);
+        let mut children = vec![(vec![c("Ks"), c("Kd"), c("Kc")], showdown())];
+        children.extend(
+            (0..52u8)
+                .filter(|&card| {
+                    dead & (1 << card) == 0 && ![c("Ks"), c("Kd"), c("Kc")].contains(&card)
+                })
+                .map(|card| (vec![card], showdown())),
+        );
+        Tree {
+            root: Node::Chance { children },
+            num_decision_nodes: 0,
+        }
+    };
+    let error = Trainer::new(
+        flop_tree,
+        flop.clone(),
+        combos("77,88,AKs", "77,88,AKs", &flop),
+        TrainerOptions::default(),
+    )
+    .err();
+    // A legal group passes the group check and fails only on the flop
+    // showdown, which needs a fifth card.
+    assert_eq!(error, Some(TrainerError::TreeBoardMismatch));
+}
