@@ -298,7 +298,7 @@ fn target_values_match_frozen_traversal_bit_for_bit() {
                 for c in &mut combos[0] { if rank(c.cards[0])==10 && rank(c.cards[1])==10 {c.weight=0.0;} }
                 for algorithm in [SolverAlgorithm::Cfr,SolverAlgorithm::CfrPlus,SolverAlgorithm::Dcfr] {
                     for schedule in [UpdateSchedule::Simultaneous,UpdateSchedule::Alternating] {
-                        let make=||Trainer::new(build_tree(&cfg), board.clone(), combos.clone(), TrainerOptions { algorithm, schedule, abstraction: if bucketed {CardAbstraction{flop:Some(2),turn:Some(2),river:Some(2)}} else {CardAbstraction::default()} });
+                        let make=||Trainer::new(build_tree(&cfg).unwrap(), board.clone(), combos.clone(), TrainerOptions { algorithm, schedule, abstraction: if bucketed {CardAbstraction{flop:Some(2),turn:Some(2),river:Some(2)}} else {CardAbstraction::default()} }).unwrap();
                         let mut candidate=make();let mut legacy=make();
                         for batch in [0,1,3] {
                             assert_eq!(candidate.train(batch).map(f64::to_bits),legacy.legacy_train(batch).map(f64::to_bits),"{board_text} iso={iso} bucketed={bucketed} {algorithm:?} {schedule:?}");
@@ -343,7 +343,7 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
         .map(|s| Range::parse(s).unwrap().combos(set_from_cards(&board)));
     let make = || {
         Trainer::new(
-            build_tree(&cfg),
+            build_tree(&cfg).unwrap(),
             board.clone(),
             combos.clone(),
             TrainerOptions {
@@ -352,6 +352,7 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
                 ..TrainerOptions::default()
             },
         )
+        .unwrap()
     };
     let mut candidate = make();
     let mut legacy = make();
@@ -419,7 +420,7 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
             for schedule in [UpdateSchedule::Simultaneous, UpdateSchedule::Alternating] {
                 let make = || {
                     Trainer::new(
-                        build_tree(&cfg),
+                        build_tree(&cfg).unwrap(),
                         board.clone(),
                         combos.clone(),
                         TrainerOptions {
@@ -431,6 +432,7 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
                             },
                         },
                     )
+                    .unwrap()
                 };
                 let mut candidate = make();
                 let mut legacy = make();
@@ -508,7 +510,7 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
                         {
                             let make = || {
                                 Trainer::new(
-                                    build_tree(&cfg),
+                                    build_tree(&cfg).unwrap(),
                                     board.clone(),
                                     combos.clone(),
                                     TrainerOptions {
@@ -525,6 +527,7 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
                                         },
                                     },
                                 )
+                                .unwrap()
                             };
                             let mut candidate = make();
                             let mut legacy = make();

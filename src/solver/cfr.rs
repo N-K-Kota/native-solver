@@ -23,7 +23,7 @@
 
 use super::discount::{IterationUpdate, SolverAlgorithm, UpdateSchedule};
 use super::terminal::{BoardOrder, TerminalIndex};
-use super::tree::{Node, Terminal};
+use super::tree::{validate_board, BoardError, Node, Player, Terminal};
 #[cfg(test)]
 use crate::card::CardSet;
 use crate::card::{rank, set_contains, set_from_cards, suit, Card};
@@ -153,6 +153,271 @@ impl std::fmt::Display for PolicyError {
 }
 
 impl std::error::Error for PolicyError {}
+
+/// Why [`Trainer::new`] rejected its inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainerError {
+    /// The initial board is not a legal flop, turn, or river.
+    Board(BoardError),
+    /// The tree does not continue from the initial board: it reaches a
+    /// showdown before the river, or deals a card past the river.
+    TreeBoardMismatch,
+    /// The tree is malformed: decision ids are not exactly
+    /// `0..num_decision_nodes`, actions and children differ in length, a
+    /// chance node does not deal every undealt card exactly once, or a
+    /// terminal investment is negative or not finite.
+    InvalidTree {
+        /// What was wrong.
+        reason: &'static str,
+    },
+    /// A player's range has no combo with positive weight.
+    EmptyRange {
+        /// The player whose range is empty.
+        player: Player,
+    },
+    /// A combo has a card outside `0..52` or the same card twice.
+    InvalidCombo {
+        /// The player whose range holds the combo.
+        player: Player,
+        /// The combo's index in that player's range.
+        index: usize,
+    },
+    /// A combo appears more than once in the same range.
+    DuplicateCombo {
+        /// The player whose range holds the combo.
+        player: Player,
+        /// The index of the second occurrence.
+        index: usize,
+    },
+    /// A combo uses a card that is already on the initial board. Pass the
+    /// board as dead cards to [`Range::combos`](crate::Range::combos).
+    ComboConflictsWithBoard {
+        /// The player whose range holds the combo.
+        player: Player,
+        /// The combo's index in that player's range.
+        index: usize,
+    },
+    /// A combo weight is negative or not finite.
+    InvalidWeight {
+        /// The player whose range holds the combo.
+        player: Player,
+        /// The combo's index in that player's range.
+        index: usize,
+    },
+    /// Every pair of positive-weight combos shares a card, so no deal is
+    /// possible and every value would be undefined.
+    NoCompatibleDeals,
+    /// A [`CardAbstraction`] street asks for zero buckets.
+    ZeroBuckets,
+    /// The tree groups chance cards by suit isomorphism, but a range is not
+    /// closed under the board's free-suit swaps with equal weights.
+    AsymmetricRange {
+        /// The player whose range is asymmetric.
+        player: Player,
+    },
+}
+
+impl std::fmt::Display for TrainerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Board(error) => write!(f, "invalid initial board: {error}"),
+            Self::TreeBoardMismatch => write!(f, "tree does not match the initial board"),
+            Self::InvalidTree { reason } => write!(f, "invalid tree: {reason}"),
+            Self::EmptyRange { player } => {
+                write!(f, "{player:?} range has no combo with positive weight")
+            }
+            Self::InvalidCombo { player, index } => write!(
+                f,
+                "{player:?} combo {index} must hold two distinct cards in 0..52"
+            ),
+            Self::DuplicateCombo { player, index } => {
+                write!(f, "{player:?} combo {index} repeats an earlier combo")
+            }
+            Self::ComboConflictsWithBoard { player, index } => write!(
+                f,
+                "{player:?} combo {index} uses a card on the initial board"
+            ),
+            Self::InvalidWeight { player, index } => write!(
+                f,
+                "{player:?} combo {index} weight must be finite and nonnegative"
+            ),
+            Self::NoCompatibleDeals => {
+                write!(f, "no pair of positive-weight combos can be dealt together")
+            }
+            Self::ZeroBuckets => write!(f, "card abstraction bucket counts must be positive"),
+            Self::AsymmetricRange { player } => write!(
+                f,
+                "{player:?} range must be suit-symmetric when the tree uses suit isomorphism"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TrainerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Board(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<BoardError> for TrainerError {
+    fn from(error: BoardError) -> Self {
+        Self::Board(error)
+    }
+}
+
+/// Rejects inputs that `Trainer` cannot solve as a legal game.
+fn validate_trainer_inputs(
+    tree: &super::tree::Tree,
+    initial_board: &[Card],
+    combos: &[Vec<Combo>; 2],
+    abstraction: CardAbstraction,
+) -> Result<(), TrainerError> {
+    validate_board(initial_board)?;
+    let mut seen_ids = vec![false; tree.num_decision_nodes];
+    validate_tree(&tree.root, &mut initial_board.to_vec(), &mut seen_ids)?;
+    if seen_ids.iter().any(|&seen| !seen) {
+        return Err(TrainerError::InvalidTree {
+            reason: "decision ids must cover 0..num_decision_nodes",
+        });
+    }
+
+    let board = set_from_cards(initial_board);
+    let mut masks = [Vec::new(), Vec::new()];
+    for (p, player) in [Player::Oop, Player::Ip].into_iter().enumerate() {
+        let mut seen = std::collections::HashSet::new();
+        for (index, combo) in combos[p].iter().enumerate() {
+            let [a, b] = combo.cards;
+            if a >= 52 || b >= 52 || a == b {
+                return Err(TrainerError::InvalidCombo { player, index });
+            }
+            if !combo.weight.is_finite() || combo.weight < 0.0 {
+                return Err(TrainerError::InvalidWeight { player, index });
+            }
+            if !seen.insert(normalize_pair(a, b)) {
+                return Err(TrainerError::DuplicateCombo { player, index });
+            }
+            if combo.mask() & board != 0 {
+                return Err(TrainerError::ComboConflictsWithBoard { player, index });
+            }
+            if combo.weight > 0.0 {
+                masks[p].push(combo.mask());
+            }
+        }
+        if masks[p].is_empty() {
+            return Err(TrainerError::EmptyRange { player });
+        }
+    }
+    if !masks[0]
+        .iter()
+        .any(|&oop| masks[1].iter().any(|&ip| oop & ip == 0))
+    {
+        return Err(TrainerError::NoCompatibleDeals);
+    }
+
+    if [abstraction.flop, abstraction.turn, abstraction.river].contains(&Some(0)) {
+        return Err(TrainerError::ZeroBuckets);
+    }
+    if has_suit_reduction(&tree.root) {
+        // Later boards only remove free suits, so symmetry under the initial
+        // board's free-suit swaps covers every reduced chance node.
+        let free: Vec<u8> = (0..4)
+            .filter(|&s| !initial_board.iter().any(|&c| suit(c) == s))
+            .collect();
+        for (p, player) in [Player::Oop, Player::Ip].into_iter().enumerate() {
+            let weights: HashMap<(Card, Card), f64> = combos[p]
+                .iter()
+                .map(|combo| (normalize_pair(combo.cards[0], combo.cards[1]), combo.weight))
+                .collect();
+            for (i, &sa) in free.iter().enumerate() {
+                for &sb in &free[i + 1..] {
+                    for combo in &combos[p] {
+                        let [a, b] = combo.cards;
+                        let swapped = normalize_pair(swap_suit(a, sa, sb), swap_suit(b, sa, sb));
+                        if weights.get(&swapped) != Some(&combo.weight) {
+                            return Err(TrainerError::AsymmetricRange { player });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks the structure `Trainer` relies on while walking `node` from `board`.
+fn validate_tree(
+    node: &Node,
+    board: &mut Vec<Card>,
+    seen_ids: &mut [bool],
+) -> Result<(), TrainerError> {
+    let invalid = |reason| Err(TrainerError::InvalidTree { reason });
+    match node {
+        Node::Decision {
+            id,
+            actions,
+            children,
+            ..
+        } => {
+            match seen_ids.get_mut(*id) {
+                Some(seen) if !*seen => *seen = true,
+                Some(_) => return invalid("decision ids must be unique"),
+                None => return invalid("decision ids must be below num_decision_nodes"),
+            }
+            if actions.is_empty() || actions.len() != children.len() {
+                return invalid("decisions need matching nonempty actions and children");
+            }
+            for child in children {
+                validate_tree(child, board, seen_ids)?;
+            }
+        }
+        Node::Chance { children } => {
+            if board.len() >= 5 {
+                return Err(TrainerError::TreeBoardMismatch);
+            }
+            let mut dealt = set_from_cards(board);
+            let mut count = 0;
+            for (members, _) in children {
+                if members.is_empty() {
+                    return invalid("chance classes must not be empty");
+                }
+                for &card in members {
+                    if card >= 52 || set_contains(dealt, card) {
+                        return invalid("chance nodes must deal each undealt card exactly once");
+                    }
+                    dealt |= 1u64 << card;
+                    count += 1;
+                }
+            }
+            if count != 52 - board.len() {
+                return invalid("chance nodes must deal each undealt card exactly once");
+            }
+            for (members, child) in children {
+                board.push(members[0]);
+                let result = validate_tree(child, board, seen_ids);
+                board.pop();
+                result?;
+            }
+        }
+        Node::Terminal(terminal) => {
+            let invested = match terminal {
+                Terminal::Fold { invested, .. } => invested,
+                Terminal::Showdown { invested } => {
+                    if board.len() != 5 {
+                        return Err(TrainerError::TreeBoardMismatch);
+                    }
+                    invested
+                }
+            };
+            if invested.iter().any(|x| !x.is_finite() || *x < 0.0) {
+                return invalid("terminal investments must be finite and nonnegative");
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Everything about a solve that training never changes: the tree, ranges,
 /// board caches, card abstraction, and suit-symmetry groups. Read methods
@@ -296,10 +561,24 @@ impl Trainer {
     /// board-free suit swap, with equal weights for the corresponding combos.
     /// Canonical `Range` inputs satisfy this after initial-board removal.
     ///
-    /// # Panics
-    /// A reduced tree with missing suit counterparts or asymmetric weights is
-    /// rejected: representative-only traversal cannot evaluate that game.
+    /// # Errors
+    /// Returns a [`TrainerError`] if the board is illegal, the tree does not
+    /// continue from it or is malformed, a range is empty or holds invalid,
+    /// repeated, or board-blocked combos, no deal is possible, an abstraction
+    /// asks for zero buckets, or a suit-reduced tree gets an asymmetric range.
     pub fn new(
+        tree: super::tree::Tree,
+        initial_board: Vec<Card>,
+        combos: [Vec<Combo>; 2],
+        options: TrainerOptions,
+    ) -> Result<Self, TrainerError> {
+        validate_trainer_inputs(&tree, &initial_board, &combos, options.abstraction)?;
+        Ok(Self::new_unchecked(tree, initial_board, combos, options))
+    }
+
+    /// `new` without input validation, for tests that drive the terminal
+    /// kernels with deliberately degenerate ranges.
+    fn new_unchecked(
         tree: super::tree::Tree,
         initial_board: Vec<Card>,
         combos: [Vec<Combo>; 2],
@@ -2112,7 +2391,8 @@ mod tests {
                 },
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(trainer.train(1), [0.0, 0.0]);
         {
             let data = trainer.node_data[0].lock().unwrap();
@@ -2172,7 +2452,7 @@ mod tests {
             }) {
                 let make = || {
                     Trainer::new(
-                        build_tree(&cfg),
+                        build_tree(&cfg).unwrap(),
                         cfg.board.clone(),
                         combos.clone(),
                         TrainerOptions {
@@ -2184,6 +2464,7 @@ mod tests {
                             },
                         },
                     )
+                    .unwrap()
                 };
                 let mut whole = make();
                 let mut chunks = make();
@@ -2238,7 +2519,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         Scenario {
             tree,
             trainer_combos: [oop_combos, ip_combos],
@@ -2263,7 +2544,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         let [ev0, ev1] = trainer.train(20_000);
         assert!(
             (ev0 + ev1).abs() < 1.0,
@@ -2309,7 +2591,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer.train(60_000);
 
         let root_strategy = trainer.average_strategy(root_id); // [action][combo], action 1 = Bet
@@ -2433,7 +2716,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         MultiStreetScenario {
             tree,
             trainer_combos,
@@ -2458,7 +2741,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         let [ev0, ev1] = trainer.train(500);
         assert!(
             (ev0 + ev1).abs() < 1.0,
@@ -2493,7 +2777,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer.train(4_000);
 
         let root_strategy = trainer.average_strategy(root_id); // [action][combo], action 1 = Bet
@@ -2606,7 +2891,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         MultiStreetScenario {
             tree,
             trainer_combos,
@@ -2680,7 +2965,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         reduced_trainer.train(iterations);
         let mut unreduced_trainer = Trainer::new(
             unreduced.tree,
@@ -2690,7 +2976,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         unreduced_trainer.train(iterations);
 
         let tol = 0.05;
@@ -2810,8 +3097,8 @@ mod tests {
             suit_isomorphism: false,
         };
 
-        let tree_none = build_tree(&cfg);
-        let tree_bucketed = build_tree(&cfg);
+        let tree_none = build_tree(&cfg).unwrap();
+        let tree_bucketed = build_tree(&cfg).unwrap();
         let (root_id, ip_facing_bet_id) = root_and_ip_facing_bet_ids(&tree_none.root);
 
         let iterations = 3_000;
@@ -2823,7 +3110,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer_none.train(iterations);
         // 100 exceeds both players' combo counts here, so this is a bijection on both sides.
         let mut trainer_bucketed = Trainer::new(
@@ -2838,7 +3126,8 @@ mod tests {
                 },
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer_bucketed.train(iterations);
 
         let tol = 0.05;
@@ -2904,7 +3193,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         let (root_id, _) = root_and_ip_facing_bet_ids(&tree.root);
 
         let combos0 = oop_combos.clone();
@@ -2920,7 +3209,8 @@ mod tests {
                 },
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         let [ev0, ev1] = trainer.train(4_000);
         assert!(
             (ev0 + ev1).abs() < 1.0,
@@ -3062,7 +3352,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: true,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         FlopScenario {
             tree,
             trainer_combos,
@@ -3094,7 +3384,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer_none.train(iterations);
         let mut trainer_bucketed = Trainer::new(
             scenario_bucketed.tree,
@@ -3108,7 +3399,8 @@ mod tests {
                 },
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer_bucketed.train(iterations);
 
         let tol = 0.05;
@@ -3158,7 +3450,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer_none.train(iterations);
         let mut trainer_bucketed = Trainer::new(
             scenario_bucketed.tree,
@@ -3172,7 +3465,8 @@ mod tests {
                 },
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer_bucketed.train(iterations);
 
         let tol = 0.08;
@@ -3227,7 +3521,8 @@ mod tests {
                 },
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         let [ev0, ev1] = trainer.train(1_500);
         assert!(
             (ev0 + ev1).abs() < 1.0,
@@ -3321,7 +3616,8 @@ mod tests {
                     },
                     ..TrainerOptions::default()
                 },
-            );
+            )
+            .unwrap();
             let [ev0, ev1] = trainer.train(iters);
             assert!(
                 (ev0 + ev1).abs() < 1e-6,
@@ -3344,7 +3640,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer.train(20_000);
         let (_, [ev0, ev1]) = trainer.evaluate();
         assert!(
@@ -3375,7 +3672,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer.train(5_000);
 
         let (eval, _) = trainer.evaluate();
@@ -3427,7 +3725,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer.train(500);
 
         let (eval, _) = trainer.evaluate();
@@ -3478,7 +3777,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer.train(20_000);
         let (eval, _) = trainer.evaluate();
 
@@ -3555,7 +3855,7 @@ mod tests {
         };
         let make = || {
             Trainer::new(
-                build_tree(&cfg),
+                build_tree(&cfg).unwrap(),
                 board.clone(),
                 combos.clone(),
                 TrainerOptions {
@@ -3564,6 +3864,7 @@ mod tests {
                     ..TrainerOptions::default()
                 },
             )
+            .unwrap()
         };
         let bits = |(nodes, root): (HashMap<usize, NodeEvaluation>, [f64; 2])| {
             let mut nodes: Vec<_> = nodes
@@ -3647,7 +3948,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         few_trainer.train(100);
         let few_expl = few_trainer.exploitability();
 
@@ -3660,7 +3962,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         many_trainer.train(20_000);
         let many_expl = many_trainer.exploitability();
 
@@ -3694,7 +3997,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         trainer.train(20_000);
         let expl = trainer.exploitability();
         assert!(
@@ -3774,7 +4078,9 @@ mod tests {
             },
             num_decision_nodes: 2,
         };
-        Trainer::new(
+        // Unchecked: the fixtures deliberately include board-blocked combos
+        // and impossible deals, which the kernels must still ignore.
+        Trainer::new_unchecked(
             tree,
             board,
             combos,
@@ -3903,7 +4209,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         reduced_trainer.train(iterations);
         let mut unreduced_trainer = Trainer::new(
             unreduced.tree,
@@ -3913,7 +4220,8 @@ mod tests {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         unreduced_trainer.train(iterations);
 
         let reduced_expl = reduced_trainer.exploitability();
@@ -3981,7 +4289,9 @@ mod terminal_regression_tests {
                     }),
                     num_decision_nodes: 0,
                 };
-                let trainer = Trainer::new(
+                // Unchecked: blocked, repeated, and empty ranges exercise the
+                // kernels' degenerate paths.
+                let trainer = Trainer::new_unchecked(
                     tree,
                     board.clone(),
                     combos,
@@ -4078,23 +4388,25 @@ mod terminal_regression_tests {
                 suit_isomorphism: false,
             };
             let mut actual = Trainer::new(
-                build_tree(&cfg),
+                build_tree(&cfg).unwrap(),
                 board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
                     ..TrainerOptions::default()
                 },
-            );
+            )
+            .unwrap();
             let mut reference = Trainer::new(
-                build_tree(&cfg),
+                build_tree(&cfg).unwrap(),
                 board,
                 combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
                     ..TrainerOptions::default()
                 },
-            );
+            )
+            .unwrap();
             reference
                 .use_pairwise_terminals
                 .store(true, std::sync::atomic::Ordering::Relaxed);

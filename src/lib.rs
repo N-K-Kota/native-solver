@@ -30,7 +30,7 @@ pub use card::{
 pub use eval::{category_of, evaluate_5, evaluate_7, HandCategory};
 pub use range::{all_canonical_hands, Combo, Range, RangeError};
 pub use solver::{
-    build_tree, build_tree_bounded, Action, CardAbstraction, Chips, Exploitability, GameConfig,
-    Node, NodeEvaluation, Player, Policy, PolicyError, SolverAlgorithm, SolverGame, Terminal,
-    Trainer, TrainerOptions, Tree, TreeError, UpdateSchedule, CHIP_SCALE,
+    build_tree, build_tree_bounded, Action, BoardError, CardAbstraction, Chips, Exploitability,
+    GameConfig, Node, NodeEvaluation, Player, Policy, PolicyError, SolverAlgorithm, SolverGame,
+    Terminal, Trainer, TrainerError, TrainerOptions, Tree, TreeError, UpdateSchedule, CHIP_SCALE,
 };

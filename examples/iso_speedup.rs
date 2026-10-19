@@ -29,7 +29,7 @@ fn run(suit_isomorphism: bool, iterations: u32) -> (usize, std::time::Duration, 
         max_raises: 1,
         suit_isomorphism,
     };
-    let tree = build_tree(&cfg);
+    let tree = build_tree(&cfg).unwrap();
     let num_decision_nodes = tree.num_decision_nodes;
     let mut trainer = Trainer::new(
         tree,
@@ -39,7 +39,8 @@ fn run(suit_isomorphism: bool, iterations: u32) -> (usize, std::time::Duration, 
             algorithm: SolverAlgorithm::CfrPlus,
             ..TrainerOptions::default()
         },
-    );
+    )
+    .unwrap();
     let start = Instant::now();
     let ev = trainer.train(iterations);
     (num_decision_nodes, start.elapsed(), ev)

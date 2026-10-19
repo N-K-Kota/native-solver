@@ -167,7 +167,8 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                         schedule,
                         ..TrainerOptions::default()
                     },
-                );
+                )
+                .unwrap();
                 let mut old = Trainer::new(
                     legacy,
                     board.clone(),
@@ -177,7 +178,8 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                         schedule,
                         ..TrainerOptions::default()
                     },
-                );
+                )
+                .unwrap();
                 assert_eq!(new.train(3), old.train(3));
                 compare_real_policies(new.tree(), old.tree(), &new, &old);
                 let q = new.exploitability();

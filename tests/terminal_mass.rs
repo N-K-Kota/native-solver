@@ -1,5 +1,5 @@
 //! Public-API regressions for blocker subtraction near zero compatible reach.
-use native_solver::solver::{Action, Node, Player, Terminal, Trainer, Tree};
+use native_solver::solver::{Action, Node, Player, Terminal, Trainer, TrainerError, Tree};
 use native_solver::solver::{SolverAlgorithm, TrainerOptions};
 use native_solver::{card_from_str, evaluate_7, Combo};
 
@@ -7,7 +7,7 @@ fn combo(a: &str, b: &str, weight: f64) -> Combo {
     Combo::new(card_from_str(a).unwrap(), card_from_str(b).unwrap(), weight)
 }
 
-fn trainer(compatible_weight: Option<f64>, fold: bool) -> Trainer {
+fn trainer(compatible_weight: Option<f64>, fold: bool) -> Result<Trainer, TrainerError> {
     let board: Vec<_> = ["2c", "7d", "9h", "Js", "Qd"]
         .iter()
         .map(|s| card_from_str(s).unwrap())
@@ -59,21 +59,13 @@ fn trainer(compatible_weight: Option<f64>, fold: bool) -> Trainer {
 }
 
 #[test]
-fn all_opponent_reach_blocked_means_zero_mass_and_undefined_exploitability() {
+fn all_opponent_reach_blocked_is_rejected_as_no_compatible_deals() {
+    // Every opponent combo shares a card with the hero's only combo, so no
+    // deal exists and every value would be undefined.
     for fold in [false, true] {
-        let mut trainer = trainer(None, fold);
-        let raw = trainer.train(1);
-        let (nodes, evaluated) = trainer.evaluate();
-        assert_eq!(raw, [0.0, 0.0]);
-        assert_eq!(evaluated, [0.0, 0.0]);
-        assert_eq!(nodes[&0].ev[0], 0.0);
-        assert_eq!(nodes[&0].equity.as_ref().unwrap()[0], 0.5);
-        let exploitability = trainer.exploitability();
-        assert!(
-            exploitability.oop.is_nan()
-                && exploitability.ip.is_nan()
-                && exploitability.total.is_nan(),
-            "no legal deals must not yield finite exploitability: {exploitability:?}"
+        assert_eq!(
+            trainer(None, fold).err(),
+            Some(TrainerError::NoCompatibleDeals)
         );
     }
 }
@@ -82,7 +74,7 @@ fn all_opponent_reach_blocked_means_zero_mass_and_undefined_exploitability() {
 fn tiny_compatible_reach_survives_larger_blocked_reach() {
     for weight in [1e-12, 1e-18, 1e-100] {
         for fold in [false, true] {
-            let mut trainer = trainer(Some(weight), fold);
+            let mut trainer = trainer(Some(weight), fold).unwrap();
             let raw = trainer.train(1);
             let expected = 50.0 * weight;
             assert!(
@@ -148,7 +140,8 @@ fn highly_unequal_showdown_investments_preserve_small_payouts() {
                     algorithm: SolverAlgorithm::CfrPlus,
                     ..TrainerOptions::default()
                 },
-            );
+            )
+            .unwrap();
             let won = invested[1 - winner];
             let expected = if winner == 0 {
                 [won, -won]

@@ -9,7 +9,9 @@
 //! (`Chips`), so an all-in leaves exactly zero behind at any input scale.
 
 use super::chips::Chips;
-use crate::card::{rank, set_contains, set_from_cards, suit, Card};
+use crate::card::{
+    card_bit, card_to_string, rank, set_contains, set_from_cards, suit, Card, CardSet,
+};
 
 /// Setup for betting starting from a given (partial or complete) board.
 #[derive(Debug, Clone)]
@@ -135,9 +137,76 @@ pub enum Node {
     Terminal(Terminal),
 }
 
+/// Why a board was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardError {
+    /// The board must have 3 (flop), 4 (turn), or 5 (river) cards.
+    WrongSize {
+        /// The number of cards supplied.
+        len: usize,
+    },
+    /// A card is outside `0..52`.
+    InvalidCard {
+        /// The offending card value.
+        card: Card,
+    },
+    /// The same card appears more than once.
+    DuplicateCard {
+        /// The repeated card.
+        card: Card,
+    },
+}
+
+impl std::fmt::Display for BoardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongSize { len } => write!(f, "board has {len} cards; expected 3, 4, or 5"),
+            Self::InvalidCard { card } => write!(f, "board card {card} is outside 0..52"),
+            Self::DuplicateCard { card } => {
+                write!(
+                    f,
+                    "board card {} appears more than once",
+                    card_to_string(*card)
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BoardError {}
+
+/// Checks that `board` is a legal flop, turn, or river.
+pub(crate) fn validate_board(board: &[Card]) -> Result<(), BoardError> {
+    if !(3..=5).contains(&board.len()) {
+        return Err(BoardError::WrongSize { len: board.len() });
+    }
+    let mut seen: CardSet = 0;
+    for &card in board {
+        if card >= 52 {
+            return Err(BoardError::InvalidCard { card });
+        }
+        if set_contains(seen, card) {
+            return Err(BoardError::DuplicateCard { card });
+        }
+        seen |= card_bit(card);
+    }
+    Ok(())
+}
+
 /// Why a betting tree was not built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeError {
+    /// `GameConfig::board` is not a legal flop, turn, or river.
+    Board(BoardError),
+    /// `GameConfig::pot` is zero or negative.
+    NonPositivePot,
+    /// `GameConfig::effective_stack` is negative.
+    NegativeStack,
+    /// A bet size is zero, negative, or not finite.
+    InvalidBetSize {
+        /// Position of the size in `GameConfig::bet_sizes`.
+        index: usize,
+    },
     /// The tree would need more decision nodes than the supplied budget.
     TooManyDecisionNodes {
         /// The decision-node budget that was exceeded.
@@ -148,6 +217,13 @@ pub enum TreeError {
 impl std::fmt::Display for TreeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Board(error) => write!(f, "invalid board: {error}"),
+            Self::NonPositivePot => write!(f, "pot must be positive"),
+            Self::NegativeStack => write!(f, "effective stack must not be negative"),
+            Self::InvalidBetSize { index } => write!(
+                f,
+                "bet size at index {index} must be a positive, finite pot fraction"
+            ),
             Self::TooManyDecisionNodes { limit } => write!(
                 f,
                 "game tree exceeds {limit} decision nodes; reduce bet sizes, raises, or start on a later street"
@@ -156,7 +232,39 @@ impl std::fmt::Display for TreeError {
     }
 }
 
-impl std::error::Error for TreeError {}
+impl std::error::Error for TreeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Board(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<BoardError> for TreeError {
+    fn from(error: BoardError) -> Self {
+        Self::Board(error)
+    }
+}
+
+/// Rejects a configuration that does not describe a legal game.
+fn validate_config(cfg: &GameConfig) -> Result<(), TreeError> {
+    validate_board(&cfg.board)?;
+    if cfg.pot <= Chips::ZERO {
+        return Err(TreeError::NonPositivePot);
+    }
+    if cfg.effective_stack < Chips::ZERO {
+        return Err(TreeError::NegativeStack);
+    }
+    if let Some(index) = cfg
+        .bet_sizes
+        .iter()
+        .position(|&size| !size.is_finite() || size <= 0.0)
+    {
+        return Err(TreeError::InvalidBetSize { index });
+    }
+    Ok(())
+}
 
 /// A built betting tree.
 pub struct Tree {
@@ -168,14 +276,24 @@ pub struct Tree {
 
 /// Builds the full betting tree for `cfg`. Use [`build_tree_bounded`] for
 /// untrusted input, since the tree can grow very large.
-pub fn build_tree(cfg: &GameConfig) -> Tree {
-    build_tree_bounded(cfg, usize::MAX).expect("unbounded tree construction")
+///
+/// # Errors
+/// Returns an error if the board is not a legal flop, turn, or river, the
+/// pot is not positive, the stack is negative, or a bet size is not a
+/// positive finite number.
+pub fn build_tree(cfg: &GameConfig) -> Result<Tree, TreeError> {
+    build_tree_bounded(cfg, usize::MAX)
 }
 
 /// Stops construction before allocating a decision beyond the supplied budget.
 /// Callers must also bound input size and recursion depth (notably max_raises).
 /// Successful trees preserve the same node IDs and actions as `build_tree`.
+///
+/// # Errors
+/// Returns the same configuration errors as [`build_tree`], or
+/// [`TreeError::TooManyDecisionNodes`] when the budget is exceeded.
 pub fn build_tree_bounded(cfg: &GameConfig, max_decision_nodes: usize) -> Result<Tree, TreeError> {
+    validate_config(cfg)?;
     let mut budget = BuildBudget {
         next_id: 0,
         max_decision_nodes,
@@ -570,9 +688,9 @@ mod tests {
         for (pot, stack) in [(5500, 9000), (1500, 3900)] {
             for board in [river_board(), turn_board()] {
                 let cfg = config(board, Chips(pot), Chips(stack), vec![0.33, 0.75, 1.5], 3);
-                let base = build_tree(&cfg).num_decision_nodes;
+                let base = build_tree(&cfg).unwrap().num_decision_nodes;
                 for scale in [1, 10, 100] {
-                    let tree = build_tree(&scaled(&cfg, scale));
+                    let tree = build_tree(&scaled(&cfg, scale)).unwrap();
                     assert_eq!(
                         tree.num_decision_nodes, base,
                         "pot {pot} stack {stack} x{scale}"
@@ -593,7 +711,7 @@ mod tests {
             vec![0.33, 0.75, 1.5],
             3,
         );
-        assert_eq!(build_tree(&river).num_decision_nodes, 26);
+        assert_eq!(build_tree(&river).unwrap().num_decision_nodes, 26);
     }
 
     #[test]
@@ -616,10 +734,14 @@ mod tests {
                 .collect();
             let cfg = config(river_board(), pot, stack, sizes, next(3) as u32);
             let mut base = Vec::new();
-            shape(&build_tree(&cfg).root, 1, &mut base);
+            shape(&build_tree(&cfg).unwrap().root, 1, &mut base);
             for scale in [10, 100] {
                 let mut other = Vec::new();
-                shape(&build_tree(&scaled(&cfg, scale)).root, scale, &mut other);
+                shape(
+                    &build_tree(&scaled(&cfg, scale)).unwrap().root,
+                    scale,
+                    &mut other,
+                );
                 assert_eq!(base, other, "{cfg:?} x{scale}");
             }
         }
@@ -641,7 +763,7 @@ mod tests {
                 .map(|_| (1 + next(300)) as f64 / 100.0)
                 .collect();
             let cfg = config(river_board(), pot, stack, sizes, next(4) as u32);
-            check_stacks(&build_tree(&cfg).root, [stack; 2], None, false);
+            check_stacks(&build_tree(&cfg).unwrap().root, [stack; 2], None, false);
         }
     }
 
@@ -655,7 +777,7 @@ mod tests {
             max_raises: 1,
             suit_isomorphism: true,
         };
-        let original = build_tree(&cfg);
+        let original = build_tree(&cfg).unwrap();
         let bounded = build_tree_bounded(&cfg, original.num_decision_nodes).unwrap();
         assert_eq!(
             format!("{:?}", original.root),
@@ -693,7 +815,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         let Node::Decision {
             actions, children, ..
         } = &tree.root
@@ -728,7 +850,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         let Node::Decision {
             actions, children, ..
         } = &tree.root
@@ -769,7 +891,7 @@ mod tests {
             max_raises: 1,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         let Node::Decision { children, .. } = &tree.root else {
             panic!("expected decision")
         };
@@ -802,7 +924,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         let Node::Decision { children, .. } = &tree.root else {
             panic!("expected decision")
         };
@@ -848,7 +970,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: false,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         let Node::Decision { children, .. } = &tree.root else {
             panic!("expected decision")
         };
@@ -888,7 +1010,7 @@ mod tests {
             max_raises: 0,
             suit_isomorphism: true,
         };
-        let tree = build_tree(&cfg);
+        let tree = build_tree(&cfg).unwrap();
         let Node::Decision { children, .. } = &tree.root else {
             panic!("expected decision")
         };

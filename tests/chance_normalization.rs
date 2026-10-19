@@ -71,14 +71,15 @@ fn check_forced_showdown(board_text: &[&str]) {
         suit_isomorphism: false,
     };
     let mut trainer = Trainer::new(
-        build_tree(&cfg),
+        build_tree(&cfg).unwrap(),
         board,
         [vec![hero], vec![villain]],
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,
             ..TrainerOptions::default()
         },
-    );
+    )
+    .unwrap();
     let trained = trainer.train(1);
     let (nodes, evaluated) = trainer.evaluate();
     let exploitability = trainer.exploitability();

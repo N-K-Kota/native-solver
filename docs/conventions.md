@@ -94,8 +94,8 @@ This is exact only when the game is suit-symmetric:
 
 - Each player's combos must be closed under every suit swap that fixes the
   board, and swapped combos must have equal weights. Ranges from
-  `Range::combos` satisfy this. `Trainer::new` panics on a reduced tree whose
-  ranges do not.
+  `Range::combos` satisfy this. `Trainer::new` returns
+  `TrainerError::AsymmetricRange` for a reduced tree whose ranges do not.
 - Floating-point training breaks symmetry by tiny amounts, and regret
   matching can turn tiny differences into large strategy differences. The
   trainer therefore averages current and average strategies over each

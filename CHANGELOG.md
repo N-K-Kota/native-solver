@@ -16,3 +16,6 @@ First public release, imported from the solver core of a private project.
 - Node EVs, river equity, and exploitability under the average strategy;
   `Policy` snapshots that can be read while training continues.
 - An independent exact reference evaluator for small trees.
+- Input validation: `build_tree` and `Trainer::new` return `TreeError` and
+  `TrainerError` for illegal boards, chip amounts, bet sizes, trees, and
+  ranges instead of panicking or returning NaN.

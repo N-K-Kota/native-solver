@@ -103,7 +103,7 @@ fn alternating_dcfr_matches_independent_scalar_history_recurrence() {
         ];
         for schedule in [UpdateSchedule::Simultaneous, UpdateSchedule::Alternating] {
             let mut trainer = Trainer::new(
-                build_tree(&cfg),
+                build_tree(&cfg).unwrap(),
                 cfg.board.clone(),
                 [combos.clone(), combos.clone()],
                 TrainerOptions {
@@ -111,7 +111,8 @@ fn alternating_dcfr_matches_independent_scalar_history_recurrence() {
                     schedule,
                     ..TrainerOptions::default()
                 },
-            );
+            )
+            .unwrap();
             let mut regrets: Table = [[[0.0; 2]; 3]; 4];
             let mut sums = regrets;
             for t in 1..=128 {
@@ -194,7 +195,8 @@ fn alternating_suit_reduction_matches_full_runouts_and_parallel_execution() {
                 bet_sizes: vec![1.0],
                 max_raises: 0,
                 suit_isomorphism: iso,
-            });
+            })
+            .unwrap();
             if iso {
                 assert!(tree.num_decision_nodes < full_nodes);
             } else {
@@ -209,7 +211,8 @@ fn alternating_suit_reduction_matches_full_runouts_and_parallel_execution() {
                     schedule: UpdateSchedule::Alternating,
                     ..TrainerOptions::default()
                 },
-            );
+            )
+            .unwrap();
             trainer.train(30);
             let q = trainer.exploitability().total;
             let strategy = trainer.average_strategy(0);

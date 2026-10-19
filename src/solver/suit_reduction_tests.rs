@@ -161,6 +161,7 @@ fn trainer(cfg: &GameConfig, cs: &[Vec<Combo>; 2], iso: bool) -> Trainer {
             ..TrainerOptions::default()
         },
     )
+    .unwrap()
 }
 
 /// Compare individual normalized EVs and BRs, not just their zero-sum total.
@@ -465,7 +466,8 @@ fn reduced_policies_are_exactly_symmetric_across_algorithms_and_buckets() {
                                 schedule,
                                 abstraction,
                             },
-                        );
+                        )
+                        .unwrap();
                         t.train(25);
                         assert_policy_symmetry(&t);
                         audit(&oracle, &full.root, &t, false);
@@ -476,10 +478,26 @@ fn reduced_policies_are_exactly_symmetric_across_algorithms_and_buckets() {
 }
 
 #[test]
-#[should_panic(expected = "suit reduction requires suit-symmetric range weights")]
 fn reduced_tree_rejects_asymmetric_initial_weights() {
-    let cfg = config(&["Js", "9s", "4d", "2d"]);
+    let mut cfg = config(&["Js", "9s", "4d", "2d"]);
     let mut cs = combos(&cfg, ["AKs,AQs", "AKs,AQs"]);
     cs[0][0].weight = 0.25;
-    let _ = trainer(&cfg, &cs, true);
+    let new = |cfg: &GameConfig| {
+        Trainer::new(
+            build_tree_bounded(cfg, 100_000).unwrap(),
+            cfg.board.clone(),
+            cs.clone(),
+            TrainerOptions::default(),
+        )
+    };
+    cfg.suit_isomorphism = true;
+    assert_eq!(
+        new(&cfg).err(),
+        Some(TrainerError::AsymmetricRange {
+            player: Player::Oop
+        })
+    );
+    // Without reduction the same asymmetric range is a legal game.
+    cfg.suit_isomorphism = false;
+    assert!(new(&cfg).is_ok());
 }

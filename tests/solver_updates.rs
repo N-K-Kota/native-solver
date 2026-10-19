@@ -25,7 +25,8 @@ fn scheduled_fixture(
         bet_sizes: vec![0.5, 1.0],
         max_raises: 1,
         suit_isomorphism: false,
-    });
+    })
+    .unwrap();
     let nodes = tree.num_decision_nodes;
     let combos = [
         vec![
@@ -49,7 +50,8 @@ fn scheduled_fixture(
                 schedule,
                 abstraction,
             },
-        ),
+        )
+        .unwrap(),
         nodes,
     )
 }
@@ -225,7 +227,7 @@ fn legacy_boolean_constructor_keeps_its_algorithm_and_trajectory() {
         (true, SolverAlgorithm::CfrPlus),
     ] {
         let mut legacy = Trainer::new(
-            build_tree(&config),
+            build_tree(&config).unwrap(),
             config.board.clone(),
             combos.clone(),
             TrainerOptions {
@@ -236,16 +238,18 @@ fn legacy_boolean_constructor_keeps_its_algorithm_and_trajectory() {
                 },
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         let mut explicit = Trainer::new(
-            build_tree(&config),
+            build_tree(&config).unwrap(),
             config.board.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(legacy.algorithm(), algorithm);
         for iterations in [1, 2, 5, 31] {
             assert_eq!(legacy.train(iterations), explicit.train(iterations));
@@ -269,7 +273,7 @@ fn every_algorithm_converges_to_known_kuhn_value_and_policy() {
         for (algorithm, schedule) in ALGORITHMS.into_iter().flat_map(|a| {
             [UpdateSchedule::Simultaneous, UpdateSchedule::Alternating].map(|s| (a, s))
         }) {
-            let tree = build_tree(&config);
+            let tree = build_tree(&config).unwrap();
             let Node::Decision {
                 id: root_id,
                 children,
@@ -299,7 +303,8 @@ fn every_algorithm_converges_to_known_kuhn_value_and_policy() {
                     schedule,
                     ..TrainerOptions::default()
                 },
-            );
+            )
+            .unwrap();
             trainer.train(20_000);
             // evaluate() returns raw joint-range weighted totals. There are
             // six unit-weight legal deals, so divide by six for chips/deal.

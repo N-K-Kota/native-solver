@@ -12,12 +12,13 @@ mod tree;
 
 pub use cfr::{
     CardAbstraction, Exploitability, NodeEvaluation, Policy, PolicyError, SolverGame, Trainer,
-    TrainerOptions,
+    TrainerError, TrainerOptions,
 };
 pub use chips::{Chips, CHIP_SCALE};
 pub use discount::{SolverAlgorithm, UpdateSchedule};
 pub use tree::{
-    build_tree, build_tree_bounded, Action, GameConfig, Node, Player, Terminal, Tree, TreeError,
+    build_tree, build_tree_bounded, Action, BoardError, GameConfig, Node, Player, Terminal, Tree,
+    TreeError,
 };
 
 mod terminal;

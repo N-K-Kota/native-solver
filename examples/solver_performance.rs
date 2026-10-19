@@ -360,7 +360,8 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
             algorithm: options.algorithm,
             ..TrainerOptions::default()
         },
-    );
+    )
+    .unwrap();
     let initialization_seconds = total_start.elapsed().as_secs_f64();
     let mut train_time = Duration::ZERO;
     let mut diagnostic_time = Duration::ZERO;

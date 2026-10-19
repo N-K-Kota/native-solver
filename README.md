@@ -24,8 +24,8 @@ use native_solver::{
 
 let board: Vec<_> = ["Ks", "Th", "7s", "4d", "2s"]
     .iter()
-    .map(|card| card_from_str(card).unwrap())
-    .collect();
+    .map(|card| card_from_str(card))
+    .collect::<Result<_, _>>()?;
 let config = GameConfig {
     board: board.clone(),
     pot: Chips::whole(100),
@@ -37,10 +37,12 @@ let config = GameConfig {
 
 // Combos that share a card with the board are removed.
 let dead = set_from_cards(&board);
-let oop = Range::parse("AA,KK,KQs,QJs,JTs:0.5,AQo").unwrap().combos(dead);
-let ip = Range::parse("AKs,AKo,KJs,TT,99,A5s:0.5").unwrap().combos(dead);
+let oop = Range::parse("AA,KK,KQs,QJs,JTs:0.5,AQo")?.combos(dead);
+let ip = Range::parse("AKs,AKo,KJs,TT,99,A5s:0.5")?.combos(dead);
 
-let mut trainer = Trainer::new(build_tree(&config), board, [oop, ip], TrainerOptions::default());
+// Both steps validate their input and return an error instead of panicking.
+let tree = build_tree(&config)?;
+let mut trainer = Trainer::new(tree, board, [oop, ip], TrainerOptions::default())?;
 trainer.train(1000);
 
 // Average gain, in chips, that a best response could still win.
@@ -56,10 +58,20 @@ for combo in 0..strategy[0].len() {
     let total: f64 = strategy.iter().map(|row| row[combo]).sum();
     assert!((total - 1.0).abs() < 1e-9);
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Training more iterations lowers exploitability; the iteration count by itself
 says nothing about convergence. Check `exploitability()` instead.
+
+## Errors
+
+`build_tree` returns a `TreeError` for an illegal board, a non-positive pot,
+a negative stack, or a bet size that is not a positive finite number.
+`Trainer::new` returns a `TrainerError` when the tree does not continue from
+the initial board, or when a range is empty, contains invalid, repeated, or
+board-blocked combos, or cannot be dealt against the other range. Pass the
+board as dead cards to `Range::combos` to remove blocked combos.
 
 ## Conventions
 

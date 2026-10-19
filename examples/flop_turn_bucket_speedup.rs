@@ -32,7 +32,7 @@ fn run(abstraction: CardAbstraction, iterations: u32) -> (std::time::Duration, [
         max_raises: 0,
         suit_isomorphism: true,
     };
-    let tree = build_tree(&cfg);
+    let tree = build_tree(&cfg).unwrap();
     let mut trainer = Trainer::new(
         tree,
         board,
@@ -42,7 +42,8 @@ fn run(abstraction: CardAbstraction, iterations: u32) -> (std::time::Duration, [
             abstraction,
             ..TrainerOptions::default()
         },
-    );
+    )
+    .unwrap();
     let start = Instant::now();
     let ev = trainer.train(iterations);
     (start.elapsed(), ev)

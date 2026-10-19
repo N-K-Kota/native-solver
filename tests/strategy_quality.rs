@@ -5,9 +5,9 @@ use native_solver::solver::Chips;
 use native_solver::solver::TrainerOptions;
 use native_solver::solver::{
     build_tree, Action, CardAbstraction, GameConfig, Node, Player, SolverAlgorithm, Terminal,
-    Trainer, Tree, UpdateSchedule,
+    Trainer, TrainerError, Tree, UpdateSchedule,
 };
-use native_solver::{card_from_str, evaluate_7, Card, Combo};
+use native_solver::{card_from_str, evaluate_7, set_from_cards, Card, Combo};
 use std::collections::HashMap;
 
 fn card(s: &str) -> Card {
@@ -18,6 +18,16 @@ fn board(names: &[&str]) -> Vec<Card> {
 }
 fn combo(a: &str, b: &str, w: f64) -> Combo {
     Combo::new(card(a), card(b), w)
+}
+/// Drops combos that share a card with `board`, as `Range::combos` does.
+fn live(combos: &[Vec<Combo>; 2], board: &[Card]) -> [Vec<Combo>; 2] {
+    let dead = set_from_cards(board);
+    combos.clone().map(|range| {
+        range
+            .into_iter()
+            .filter(|c| !c.conflicts_with(dead))
+            .collect()
+    })
 }
 fn river() -> Vec<Card> {
     board(&["2c", "7d", "9h", "Js", "Qd"])
@@ -148,15 +158,24 @@ fn weighted_blocked_deals_have_hand_calculated_nonzero_exploitability() {
                 c.weight *= factors[p];
             }
         }
-        let trainer = Trainer::new(
-            one_bet_tree(5.0),
-            b.clone(),
-            combos,
-            TrainerOptions {
-                algorithm: SolverAlgorithm::CfrPlus,
-                ..TrainerOptions::default()
-            },
-        );
+        let new = |combos| {
+            Trainer::new(
+                one_bet_tree(5.0),
+                b.clone(),
+                combos,
+                TrainerOptions {
+                    algorithm: SolverAlgorithm::CfrPlus,
+                    ..TrainerOptions::default()
+                },
+            )
+        };
+        // The heavy board-blocked combos are rejected rather than silently
+        // weighed, so they cannot leak into the joint mass.
+        assert!(matches!(
+            new(combos.clone()).err(),
+            Some(TrainerError::ComboConflictsWithBoard { .. })
+        ));
+        let trainer = new(live(&combos, &b)).unwrap();
         let result = compare_trainer(&trainer, &b);
         // Only AA_c/d versus K_c/d and AA_h/s versus either IP hand survive.
         let expected_mass = 0.44 * factors[0] * factors[1];
@@ -293,7 +312,7 @@ fn production_quality_matches_reference_before_and_after_training_all_algorithms
     .flat_map(|a| [UpdateSchedule::Simultaneous, UpdateSchedule::Alternating].map(|s| (a, s)))
     {
         let mut trainer = Trainer::new(
-            build_tree(&cfg),
+            build_tree(&cfg).unwrap(),
             b.clone(),
             combos.clone(),
             TrainerOptions {
@@ -301,7 +320,8 @@ fn production_quality_matches_reference_before_and_after_training_all_algorithms
                 schedule,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         for iterations in [0, 1, 7, 31] {
             trainer.train(iterations);
             compare_trainer(&trainer, &b);
@@ -383,15 +403,17 @@ fn turn_and_flop_all_in_match_direct_pair_runout_enumeration() {
             max_raises: 0,
             suit_isomorphism: false,
         };
+        let combos = live(&combos, &initial);
         let trainer = Trainer::new(
-            build_tree(&cfg),
+            build_tree(&cfg).unwrap(),
             initial.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         let result = compare_trainer(&trainer, &initial);
         let expected = direct_showdown_ev(&initial, &combos, [50.0, 50.0]);
         near(result.profile_ev[0], expected);
@@ -424,7 +446,7 @@ fn turn_betting_with_private_blockers_matches_all_algorithm_profiles() {
     .flat_map(|a| [UpdateSchedule::Simultaneous, UpdateSchedule::Alternating].map(|s| (a, s)))
     {
         let mut trainer = Trainer::new(
-            build_tree(&cfg),
+            build_tree(&cfg).unwrap(),
             b.clone(),
             combos.clone(),
             TrainerOptions {
@@ -432,7 +454,8 @@ fn turn_betting_with_private_blockers_matches_all_algorithm_profiles() {
                 schedule,
                 ..TrainerOptions::default()
             },
-        );
+        )
+        .unwrap();
         for iterations in [0, 1, 9] {
             trainer.train(iterations);
             compare_trainer(&trainer, &b);
@@ -459,7 +482,8 @@ fn expanded_bucket_policy_is_evaluated_against_unrestricted_combo_responses() {
             },
             ..TrainerOptions::default()
         },
-    );
+    )
+    .unwrap();
     trainer.train(5);
     let strategy = trainer.average_strategy(0);
     near(strategy[0][0], strategy[0][1]);
@@ -546,7 +570,7 @@ fn malformed_and_reduced_trees_are_rejected_instead_of_silently_misread() {
         max_raises: 0,
         suit_isomorphism: true,
     };
-    let reduced = build_tree(&cfg);
+    let reduced = build_tree(&cfg).unwrap();
     assert!(matches!(
         ReferenceEvaluator::new(&reduced.root, &b, [&ranges[0], &ranges[1]]),
         Err(QualityError::UnsupportedChanceReduction)

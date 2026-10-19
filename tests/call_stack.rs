@@ -42,7 +42,7 @@ fn callers_spend_their_remaining_stack_before_next_street() {
         max_raises: 0,
         suit_isomorphism: false,
     };
-    let tree = build_tree(&cfg);
+    let tree = build_tree(&cfg).unwrap();
     let ip_flop = action(&tree.root, "bet50");
     let turn = chance(action(ip_flop, "call"), "Qh");
     let ip_turn = action(turn, "check");
@@ -93,7 +93,7 @@ fn no_terminal_exceeds_the_effective_stack_after_calls_and_raises() {
             suit_isomorphism: false,
         };
         check(
-            &build_tree(&cfg).root,
+            &build_tree(&cfg).unwrap().root,
             cfg.pot.to_f64() / 2.0 + cfg.effective_stack.to_f64(),
         );
     }
