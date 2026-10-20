@@ -97,12 +97,36 @@ impl fmt::Display for QualityError {
 
 impl std::error::Error for QualityError {}
 
-/// Reusable independent evaluator; expensive immutable showdown comparisons
-/// are cached once, separately from all production solver caches.
+/// An independent, exact evaluator of strategy quality for small trees.
 ///
-/// Intended for bounded fixtures, regression tests, and quality benchmarks.
-/// Time and memory scale with the explicit tree and private-pair count; this is
-/// not a production-scale replacement for the combo-vectorized evaluator.
+/// It shares no traversal code with [`Trainer`](crate::Trainer), so it can check
+/// the trainer's results. Showdown comparisons are cached once per evaluator.
+/// Time and memory grow with the tree size times the number of private-hand
+/// pairs, so use it for small trees: tests, fixtures, and quality benchmarks.
+///
+/// # Examples
+///
+/// ```
+/// use native_solver::solver::quality::ReferenceEvaluator;
+/// use native_solver::{build_tree, Card, CardSet, Chips, GameConfig, Player, Range, Trainer, TrainerOptions};
+///
+/// let board = ["Ks", "Th", "7s", "4d", "2s"]
+///     .iter()
+///     .map(|card| card.parse())
+///     .collect::<Result<Vec<Card>, _>>()?;
+/// let dead = CardSet::from_cards(&board);
+/// let config = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(100)).with_bet_sizes([1.0]);
+/// let ranges = ["AA,KQs", "QQ,JJ"].map(|r| r.parse::<Range>().unwrap().combos(dead));
+/// let mut trainer = Trainer::new(build_tree(&config)?, ranges, TrainerOptions::default())?;
+/// trainer.train(200);
+///
+/// // Check the trainer's exploitability against the independent reference.
+/// let game = trainer.game();
+/// let reference = ReferenceEvaluator::new(game.tree(), &board, Player::ALL.map(|p| game.combos(p)))?;
+/// let quality = reference.evaluate(|node| trainer.average_strategy(node))?;
+/// assert!((quality.exploitability - trainer.exploitability().total).abs() < 1e-9);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct ReferenceEvaluator<'a> {
     root: &'a Node,
     initial_board: &'a [Card],
@@ -213,8 +237,11 @@ impl<'a> ReferenceEvaluator<'a> {
         Ok(evaluator)
     }
 
-    /// Snapshot the strategy once per decision as `[action][combo]`, in the
-    /// input range order. For example: `evaluate(|id| trainer.average_strategy(id))`.
+    /// Measures the profile given by `strategy`: its EVs and exploitability.
+    ///
+    /// `strategy` is called once per decision node and returns
+    /// `[action][combo]` probabilities in the input range order, for example
+    /// `|id| trainer.average_strategy(id)`.
     ///
     /// Every column, including unreachable/blocked columns, must have finite
     /// probabilities in [0, 1] summing to one within 1e-10. Accepted roundoff is

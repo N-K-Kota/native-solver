@@ -53,13 +53,26 @@ impl fmt::Display for RangeError {
 impl std::error::Error for RangeError {}
 
 /// One concrete two-card starting hand and its weight in a range.
+///
+/// # Examples
+///
+/// ```
+/// use native_solver::{Card, CardSet, Combo};
+///
+/// let card = |s: &str| s.parse::<Card>();
+/// let combo = Combo::new(card("Kd")?, card("Ks")?, 0.5);
+/// assert!(combo.conflicts_with(CardSet::from(card("Ks")?)));
+/// assert!(!combo.conflicts_with(CardSet::from(card("Kh")?)));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Combo {
     /// The two hole cards, in no guaranteed order.
     pub cards: [Card; 2],
-    /// The combo's range weight. [`Range::combos`] yields weights in
-    /// `0.0..=1.0`; the trainer accepts any finite, nonnegative weight, and
-    /// only the ratios between weights in one range matter.
+    /// The combo's weight in its range; only ratios within one range matter.
+    ///
+    /// [`Range::combos`] yields weights in `0.0..=1.0`; the trainer accepts
+    /// any finite, nonnegative weight.
     pub weight: f64,
 }
 
@@ -124,8 +137,9 @@ impl Range {
         Self::default()
     }
 
-    /// Parse a comma-separated range spec, e.g. `"AA,AKs,AQo:0.5,72o"`.
-    /// A hand without an explicit `:weight` suffix gets weight `1.0`. Same as
+    /// Parses a comma-separated range, e.g. `"AA,AKs,AQo:0.5,72o"`.
+    ///
+    /// A hand without a `:weight` suffix gets weight `1.0`. Same as
     /// `spec.parse::<Range>()`.
     ///
     /// # Errors
@@ -155,8 +169,10 @@ impl Range {
         Ok(range)
     }
 
-    /// Set the weight for a hand in canonical notation (e.g. "AA", "AKs",
-    /// "72o"; any rank order and case). A weight of `0.0` removes the hand.
+    /// Sets the weight of a hand in canonical notation.
+    ///
+    /// The hand is written like "AA", "AKs", or "72o", in any rank order and
+    /// case. A weight of `0.0` removes the hand.
     ///
     /// # Errors
     /// Returns a [`RangeError`] if `hand` is not canonical notation or
@@ -174,8 +190,10 @@ impl Range {
         Ok(())
     }
 
-    /// The weight of a hand in canonical notation; `0.0` if it is not in the
-    /// range or the notation is invalid.
+    /// The weight of a hand in canonical notation.
+    ///
+    /// Returns `0.0` if the hand is not in the range or the notation is
+    /// invalid.
     pub fn weight(&self, hand: &str) -> f64 {
         canonicalize(hand)
             .ok()
@@ -183,11 +201,12 @@ impl Range {
             .unwrap_or(0.0)
     }
 
-    /// Expand into concrete combos, dropping any
-    /// combo that intersects `dead` (e.g. board cards or the opponent's hand).
-    /// Combos are ordered by their lower card, then their higher card, so the
-    /// order — and every solver result that sums over it — is the same on
-    /// every run regardless of how the range was built.
+    /// Expands the range into combos, dropping any that use a card in `dead`.
+    ///
+    /// Pass the board (and any other known cards) as `dead`. Combos are ordered by
+    /// their lower card, then their higher card, so the order, and every solver
+    /// result that sums over it, is the same on every run however the range was
+    /// built.
     pub fn combos(&self, dead: CardSet) -> Vec<Combo> {
         let mut out = Vec::new();
         for (hand, &weight) in &self.weights {

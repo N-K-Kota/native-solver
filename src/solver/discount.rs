@@ -26,6 +26,7 @@ pub enum SolverAlgorithm {
     /// quadratically weighted CFR+ baseline used in the DCFR paper.
     CfrPlus,
     /// Discounted CFR with fixed `(alpha, beta, gamma) = (1.5, 0, 2)`.
+    ///
     /// Negative accumulated regrets are discounted, not clipped to zero.
     #[default]
     Dcfr,
@@ -38,6 +39,7 @@ pub enum UpdateSchedule {
     #[default]
     Simultaneous,
     /// One iteration updates OOP, then IP against the updated OOP strategy.
+    ///
     /// Each player's regrets and average strategy are updated exactly once.
     /// This uses two full traversals, each averaging by the updating player's
     /// own reach.

@@ -73,10 +73,38 @@ impl TrainingPass {
     }
 }
 
-/// Learning state for one game: regret and strategy-sum tables plus the
-/// update policy. The immutable game definition is shared as
-/// `Arc<SolverGame>` (see [`Trainer::game`]), so a [`Policy`] snapshot can be
-/// evaluated without touching, or waiting for, the training tables.
+/// Trains a strategy for one game with counterfactual regret minimization.
+///
+/// A trainer owns the regret and strategy tables. The game itself
+/// ([`SolverGame`]) is immutable and shared through [`Trainer::game`], so a
+/// [`Policy`] snapshot can be read while training continues.
+///
+/// # Examples
+///
+/// ```
+/// use native_solver::{build_tree, Card, CardSet, Chips, GameConfig, Player, Range, Trainer, TrainerOptions};
+///
+/// let board = ["Ks", "Th", "7s", "4d", "2s"]
+///     .iter()
+///     .map(|card| card.parse())
+///     .collect::<Result<Vec<Card>, _>>()?;
+/// let dead = CardSet::from_cards(&board);
+/// let oop = "AA,KQs".parse::<Range>()?.combos(dead);
+/// let ip = "QQ,JJ".parse::<Range>()?.combos(dead);
+/// let config = GameConfig::new(board, Chips::whole(100), Chips::whole(100)).with_bet_sizes([1.0]);
+///
+/// let mut trainer = Trainer::new(build_tree(&config)?, [oop, ip], TrainerOptions::default())?;
+/// trainer.train(200);
+/// assert_eq!(trainer.iterations_completed(), 200);
+///
+/// // Node 0 is OOP's first decision: one row per action, one column per OOP combo.
+/// let strategy = trainer.average_strategy(0);
+/// assert_eq!(strategy[0].len(), trainer.game().combos(Player::Oop).len());
+///
+/// // How much a best response could still gain, in chips.
+/// assert!(trainer.exploitability().total < 1.0);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct Trainer {
     game: Arc<SolverGame>,
     algorithm: SolverAlgorithm,
@@ -86,10 +114,35 @@ pub struct Trainer {
     node_data: Vec<Mutex<NodeData>>,
 }
 
-/// Normalized, suit-symmetrized average strategy for every decision node,
-/// in bucket coordinates (`[node][action][bucket]`), taken at an iteration
-/// boundary. Pass it to [`SolverGame`]'s read methods; it is independent of
-/// later training.
+/// A snapshot of the average strategy at every decision node.
+///
+/// Take one with [`Trainer::policy`]; it does not change as training continues.
+/// Pass it to [`SolverGame`]'s read methods. The probabilities are normalized,
+/// suit-symmetrized, and stored per bucket as `[node][action][bucket]`
+/// ([`Policy::rows`]), so a policy can be saved and later restored with
+/// [`SolverGame::policy_from_rows`].
+///
+/// # Examples
+///
+/// ```
+/// # use native_solver::*;
+/// # let board = ["Ks", "Th", "7s", "4d", "2s"].iter().map(|c| c.parse()).collect::<Result<Vec<Card>, _>>()?;
+/// # let dead = CardSet::from_cards(&board);
+/// # let config = GameConfig::new(board, Chips::whole(100), Chips::whole(100)).with_bet_sizes([1.0]);
+/// # let ranges = ["AA,KQs", "QQ,JJ"].map(|r| r.parse::<Range>().unwrap().combos(dead));
+/// # let mut trainer = Trainer::new(build_tree(&config)?, ranges, TrainerOptions::default())?;
+/// trainer.train(100);
+/// let policy = trainer.policy();
+/// let saved: Vec<Vec<Vec<f64>>> = policy.rows().to_vec();
+///
+/// // More training does not change the snapshot.
+/// trainer.train(100);
+/// let restored = trainer.game().policy_from_rows(saved)?;
+/// assert_eq!(restored, policy);
+/// let exploitability = trainer.game().exploitability(&restored).total;
+/// assert!(exploitability.is_finite());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
     rows: Vec<Vec<Vec<f64>>>,
@@ -184,8 +237,9 @@ pub enum TrainerError {
         /// The index of the second occurrence.
         index: usize,
     },
-    /// A combo uses a card that is already on the initial board. Pass the
-    /// board as dead cards to [`Range::combos`](crate::Range::combos).
+    /// A combo uses a card that is already on the initial board.
+    ///
+    /// Pass the board as dead cards to [`Range::combos`](crate::Range::combos).
     ComboConflictsWithBoard {
         /// The player whose range holds the combo.
         player: Player,
@@ -204,9 +258,11 @@ pub enum TrainerError {
     NoCompatibleDeals,
     /// A [`CardAbstraction`] street asks for zero buckets.
     ZeroBuckets,
-    /// A range is not closed under the initial board's free-suit swaps. This
-    /// is required when the tree groups chance cards by suit isomorphism (with
-    /// equal weights for swapped combos) or when flop or turn buckets are on.
+    /// A range is not closed under the initial board's free-suit swaps.
+    ///
+    /// This is required when the tree groups chance cards by suit isomorphism
+    /// (with equal weights for swapped combos) or when flop or turn buckets are
+    /// on.
     AsymmetricRange {
         /// The player whose range is asymmetric.
         player: Player,
@@ -437,9 +493,12 @@ fn validate_tree(
     Ok(())
 }
 
-/// Everything about a solve that training never changes: the tree, ranges,
-/// board caches, card abstraction, and suit-symmetry groups. Read methods
-/// (`evaluate`, `exploitability`, `average_strategy`) take a [`Policy`].
+/// Everything about a solve that training does not change.
+///
+/// It holds the tree, the ranges, board caches, card abstraction, and
+/// suit-symmetry groups. Its read methods (`evaluate`, `exploitability`,
+/// `average_strategy`) take a [`Policy`], so they can run while a [`Trainer`]
+/// keeps training. Get one from [`Trainer::game`].
 pub struct SolverGame {
     tree: super::tree::Tree,
     initial_board: Vec<Card>,
@@ -485,9 +544,10 @@ pub struct SolverGame {
     terminal_calls: [std::sync::atomic::AtomicUsize; 2],
 }
 
-/// How a [`Trainer`] learns: the regret/averaging rule, the player-update
-/// order, and per-street card abstraction. `Default` is DCFR with
-/// simultaneous updates and every street solved exactly.
+/// How a [`Trainer`] learns: the update rule, the update order, and card abstraction.
+///
+/// The default is DCFR with simultaneous updates and every street solved
+/// exactly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TrainerOptions {
     /// The regret and strategy-averaging rule.
@@ -498,12 +558,14 @@ pub struct TrainerOptions {
     pub abstraction: CardAbstraction,
 }
 
-/// Per-street opt-in card abstraction (bucketing). `Some(n)` groups each
-/// player's combos on that street into at most `n` percentile buckets of
-/// hand strength that share one strategy; tied strengths stay in one bucket,
-/// so there can be fewer than `n`. `None` solves the street exactly, and
-/// `Default` (all `None`) never buckets. Flop and turn buckets use the mean
-/// river score over the remaining runouts; river buckets use the exact score.
+/// Which streets let hands of similar strength share one strategy (bucketing).
+///
+/// `Some(n)` groups each player's combos on that street into at most `n`
+/// percentile buckets of hand strength that share a strategy. Tied strengths
+/// stay in one bucket, so there can be fewer than `n`. `None` solves the street
+/// exactly, and the default (all `None`) never buckets. Flop and turn buckets
+/// use the mean river strength over the remaining runouts; river buckets use
+/// the exact strength.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct CardAbstraction {
     /// Bucket count for decisions on a 3-card board.
@@ -520,51 +582,45 @@ pub struct CardAbstraction {
 pub struct Evaluation {
     /// One entry per decision node, indexed by node id.
     pub nodes: Vec<NodeEvaluation>,
-    /// Root `[OOP, IP]` raw range-weighted values: zero-sum like
-    /// [`Trainer::train`]'s return, but under the evaluated policy. Not EVs;
-    /// see `docs/conventions.md`.
+    /// Root `[OOP, IP]` raw range-weighted values, not EVs.
+    ///
+    /// They are zero-sum like [`Trainer::train`]'s return, but under the evaluated
+    /// policy. See [the conventions](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/conventions.md) for the
+    /// normalization.
     pub root_values: [f64; 2],
 }
 
-/// [`SolverGame::evaluate`]'s result for one decision node — per combo, for
-/// the acting player, under the trained *average* strategy (not
-/// `train()`'s informal last-iteration current-strategy value): `ev` is
-/// the expected value from this point on (same chip units as
-/// `pot`/`bet_sizes`), and `equity` is raw showdown win probability
-/// against the opponent's reach-weighted range at this specific node —
-/// only computed where it's cheap and exact (a complete, 5-card board),
-/// since a true equity figure for an incomplete board needs a genuinely
-/// separate future-runout win-probability average (not just
-/// `avg_score`'s mean future score), which isn't implemented yet.
+/// Values at one decision node under a policy, per combo of the acting player.
+///
+/// Combos are in the acting player's range order. Equity is only reported on a
+/// complete five-card board, where it is exact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeEvaluation {
-    /// Per combo of the acting player: the node EV in input chips, i.e. the
-    /// raw counterfactual value divided by the opponent's compatible reach
-    /// (`0.0` when no opponent combo is compatible). Payoffs count half the
-    /// initial pot as each player's own investment, as in [`Terminal`]. This
-    /// is the value of the whole node under the average strategy, not the
-    /// value of any single action.
+    /// Each combo's EV from this node on, in input chips.
+    ///
+    /// It is the raw counterfactual value divided by the opponent's compatible
+    /// reach (`0.0` when no opponent combo is compatible). Payoffs count half the
+    /// initial pot as each player's own investment, as in [`Terminal`]. This is the
+    /// value of the whole node under the policy, not of any single action.
     pub ev: Vec<f64>,
-    /// Per combo of the acting player: showdown win probability (ties count
-    /// half) against the opponent's compatible reach-weighted range, or
-    /// `0.5` when no opponent combo is compatible. `Some` only on a complete
-    /// 5-card board.
+    /// Each combo's showdown win probability; `Some` only on a complete board.
+    ///
+    /// Ties count half. The probability is against the opponent's compatible,
+    /// reach-weighted range at this node, or `0.5` when no opponent combo is
+    /// compatible.
     pub equity: Option<Vec<f64>>,
 }
 
-/// [`Trainer::exploitability`]'s result: the standard CFR convergence metric.
-/// `oop`/`ip` are each player's *best-response value* — the range-weighted
-/// EV they'd get by deviating to a perfect best response against the
-/// **other** player's fixed average strategy (everything else, including
-/// the other player's own decisions, still plays the average strategy).
-/// Since the game is zero-sum, both would equal the true game value (with
-/// opposite sign) at an exact Nash equilibrium, so `total` — their average —
-/// is the textbook exploitability figure: `0` at a perfect equilibrium,
-/// growing with how much either side can still gain by deviating. Same chip
-/// units as `pot`/`bet_sizes` (not normalized to e.g. mbb or % pot).
-/// Values are expectations over compatible initial private-hand deals,
-/// normalized by their joint range weight. All fields are NaN if that
-/// weight is zero or nonfinite; callers must reject such an invalid metric.
+/// How much a best response could gain against a policy, in chips.
+///
+/// `oop` and `ip` are each player's best-response value: the range-weighted EV
+/// of deviating to a perfect best response while the other player keeps the
+/// average strategy. In a zero-sum game they cancel at an exact Nash
+/// equilibrium, so `total`, their average, is `0` there and grows with how much
+/// either side can still gain. Values are in the same chips as the pot (not
+/// mbb or a percentage of the pot), averaged over compatible initial deals
+/// weighted by both ranges. Every field is NaN when that joint weight is zero
+/// or not finite; treat such a result as invalid.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Exploitability {
     /// OOP's best-response value against IP's average strategy, in chips.
@@ -600,20 +656,16 @@ impl std::fmt::Debug for SolverGame {
 }
 
 impl Trainer {
-    /// Builds a trainer for `tree`, starting on `tree.board`, with each
-    /// player's combos (the order is kept and
-    /// is the combo axis of every per-combo result). Takes ownership of
-    /// `tree` so a [`Trainer`] can outlive the scope that built it.
+    /// Builds a trainer for `tree` and both players' combos.
     ///
-    /// `options` selects the regret/averaging rule, the player-update order
-    /// (fixed for this trainer's lifetime, including across training batches;
-    /// an alternating iteration is an OOP pass followed by an IP pass) and
-    /// per-street card abstraction. `TrainerOptions::default()` is DCFR with
-    /// simultaneous updates and no abstraction.
+    /// The combo order is kept and is the combo axis of every per-combo result.
+    /// `options` selects the update rule, the update order (fixed for this
+    /// trainer's lifetime; an alternating iteration is an OOP pass followed by an
+    /// IP pass), and per-street card abstraction.
     ///
-    /// Trees with grouped chance cards require ranges closed under every
-    /// board-free suit swap, with equal weights for the corresponding combos.
-    /// Canonical [`Range`](crate::Range) inputs satisfy this after initial-board removal.
+    /// Trees with grouped chance cards (suit isomorphism) need ranges closed under
+    /// every suit swap that fixes the board, with equal weights for swapped combos.
+    /// Ranges from [`Range::combos`](crate::Range::combos) satisfy this.
     ///
     /// # Errors
     /// Returns a [`TrainerError`] if the tree's board is illegal, the tree
@@ -787,18 +839,21 @@ impl Trainer {
         self.update_schedule
     }
 
-    /// Full iterations completed across all training batches (two passes per
-    /// alternating iteration, one per simultaneous iteration). In DCFR this
-    /// is the global clock for discounting; `train(0)` does not advance it.
+    /// Iterations completed across all calls to [`train`](Self::train).
+    ///
+    /// An alternating iteration counts once, though it makes two passes. DCFR uses
+    /// this count as its discounting clock.
     pub fn iterations_completed(&self) -> u64 {
         self.iterations_completed
     }
 
-    /// Run `iterations` CFR iterations. Returns the root expected
-    /// value for `[OOP, IP]` under the *final iteration's* current
-    /// strategy (informal — use `average_strategy` for the converged
-    /// policy, which is stable across iterations). For alternating updates,
-    /// the return is from the final IP pass, after OOP updated and before IP updates.
+    /// Runs `iterations` more training iterations.
+    ///
+    /// Returns the root `[OOP, IP]` raw range-weighted values under the last
+    /// iteration's current strategy. They are a progress signal, not EVs, and say
+    /// nothing about convergence; use [`exploitability`](Self::exploitability) for
+    /// that and [`average_strategy`](Self::average_strategy) for the result. With
+    /// alternating updates the values come from the final IP pass.
     ///
     /// # Panics
     /// Panics if the total iteration count would overflow `u64`.
@@ -1220,20 +1275,34 @@ impl SolverGame {
         bucket_count_and_map(player, board, &self.bucket_maps, &self.identity_buckets)
     }
 
-    /// One full-tree pass under the fixed, converged *average* strategy —
-    /// as opposed to `cfr()`'s training pass, which uses the evolving
-    /// regret-matching "current" strategy and mutates `node_data`. Reads only
-    /// the immutable game and `policy`, so it runs concurrently with training
-    /// and always describes exactly the iteration `policy` was taken at.
+    /// Values at every decision node under `policy`.
     ///
-    /// Returns every decision node's [`NodeEvaluation`], indexed by node id —
-    /// computing this for a single node still requires walking its entire
-    /// subtree (unlike `average_strategy`, which is a direct per-node
-    /// lookup), so callers that need more than one node's evaluation should
-    /// call this once and index the result, not call it per node — plus the
-    /// root's own range-weighted `[OOP, IP]` value pair (same shape and
-    /// same zero-sum property as `train()`'s return, but under the given
-    /// policy rather than the last training iteration's current strategy).
+    /// Reads only the game and `policy`, so it can run while training continues and
+    /// always describes the iteration `policy` was taken at. One call walks the
+    /// whole tree, so call it once and index the result rather than once per node.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use native_solver::*;
+    /// # let board = ["Ks", "Th", "7s", "4d", "2s"].iter().map(|c| c.parse()).collect::<Result<Vec<Card>, _>>()?;
+    /// # let dead = CardSet::from_cards(&board);
+    /// # let config = GameConfig::new(board, Chips::whole(100), Chips::whole(100)).with_bet_sizes([1.0]);
+    /// # let ranges = ["AA,KQs", "QQ,JJ"].map(|r| r.parse::<Range>().unwrap().combos(dead));
+    /// # let mut trainer = Trainer::new(build_tree(&config)?, ranges, TrainerOptions::default())?;
+    /// trainer.train(100);
+    /// let evaluation = trainer.game().evaluate(&trainer.policy());
+    /// assert_eq!(evaluation.nodes.len(), trainer.game().num_decision_nodes());
+    ///
+    /// // Root values are zero-sum.
+    /// let [oop, ip] = evaluation.root_values;
+    /// assert!((oop + ip).abs() < 1e-6);
+    ///
+    /// // EV of each OOP combo at the root, in chips.
+    /// let root_ev = &evaluation.nodes[0].ev;
+    /// assert_eq!(root_ev.len(), trainer.game().combos(Player::Oop).len());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn evaluate(&self, policy: &Policy) -> Evaluation {
         let mut out = HashMap::new();
         let board = self.initial_board.clone();
@@ -1269,15 +1338,10 @@ impl SolverGame {
         }
     }
 
-    /// The standard CFR convergence metric: how much either player could
-    /// still gain, in expectation over their full range, by deviating from
-    /// the trained average strategy to a perfect best response against the
-    /// *other* player's average strategy (see [`Exploitability`]'s doc
-    /// comment for the exact definition). Two independent full-tree passes
-    /// — one best-responding as OOP, one as IP — via `best_response_value`,
-    /// which mirrors `evaluate_node`'s structure but takes a max over
-    /// actions (instead of averaging by `average_strategy`) at the
-    /// deviating player's own decision nodes.
+    /// How much a best response could gain against `policy`, in chips.
+    ///
+    /// Runs one best-response pass for each player against the other's policy; see
+    /// [`Exploitability`] for the definition.
     pub fn exploitability(&self, policy: &Policy) -> Exploitability {
         let board = self.initial_board.clone();
         let empty_eval = [Vec::new(), Vec::new()];
@@ -1370,18 +1434,15 @@ impl SolverGame {
         &self.combos[player.index()]
     }
 
-    /// The card abstraction setting this trainer was built with (see
-    /// [`Trainer::new`]) — a `None` field means that street's decision nodes
-    /// are exact (unabstracted).
+    /// The card abstraction this game was built with.
     pub fn abstraction(&self) -> CardAbstraction {
         self.abstraction
     }
 
-    /// The trained average strategy for a decision node, as `[action][combo]`
-    /// probabilities (combos ordered as in the input range for that player)
-    /// — always combo-indexed regardless of whether this node was
-    /// river-bucketed internally: every combo in a bucket reports that
-    /// bucket's shared average probability.
+    /// The strategy at `node_id` under `policy`, as `[action][combo]` probabilities.
+    ///
+    /// Combos follow the acting player's range order. With card abstraction, every
+    /// combo in a bucket reports the bucket's shared probabilities.
     ///
     /// # Panics
     /// Panics if `node_id` is not below [`num_decision_nodes`](Self::num_decision_nodes)
@@ -1400,12 +1461,12 @@ impl SolverGame {
             .collect()
     }
 
-    /// Rebuilds a policy persisted from [`Policy::rows`], checking it fits this
-    /// game: one row set per decision node, one row per action, one entry per
-    /// bucket, each bucket a probability distribution, and suit-equivalent
-    /// buckets identical. Rows are taken as given (a saved policy is already
-    /// symmetrized), so reads match bit for bit; an asymmetric one is rejected
-    /// because representative-only chance traversal would misreport it.
+    /// Restores a policy saved from [`Policy::rows`].
+    ///
+    /// The rows must fit this game: one row set per decision node, one row per
+    /// action, one entry per bucket, each bucket a probability distribution, and
+    /// suit-equivalent buckets identical. Rows are used as given, so reads match
+    /// the saved policy bit for bit. See [`Policy`] for an example.
     ///
     /// # Errors
     /// Returns a [`PolicyError`] naming the first node whose rows have the
@@ -1470,9 +1531,10 @@ impl SolverGame {
         Ok(Policy { rows })
     }
 
-    /// Card-abstraction bucket of every combo, per board and player, sorted by
-    /// board. Empty when no street is bucketed. Lets a persisted policy check
-    /// that its rows still mean the same hands.
+    /// Each combo's bucket, per board and player, sorted by board.
+    ///
+    /// Empty when no street is bucketed. A saved policy can use it to check that
+    /// its rows still describe the same hands.
     pub fn bucket_assignments(&self) -> Vec<(&[Card], &[Vec<usize>; 2])> {
         let mut maps: Vec<_> = self
             .bucket_maps

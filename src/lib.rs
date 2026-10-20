@@ -1,4 +1,13 @@
-//! native-solver: a heads-up postflop No-Limit Hold'em solver.
+//! Find near-equilibrium strategies for heads-up postflop No-Limit Hold'em
+//! spots, and measure how exploitable they are.
+//!
+//! Give it a board, both players' ranges, the pot, the stacks, and the bet
+//! sizes to consider; it trains a strategy with counterfactual regret
+//! minimization (CFR, CFR+, or DCFR) and reports per-hand strategies, EVs,
+//! and exploitability: how much a perfect opponent could still win against
+//! the result. Chip amounts are exact integers, invalid inputs are reported
+//! as errors, and an independent reference evaluator can check results on
+//! small trees.
 //!
 //! - [`card`]: [`Card`]s and [`CardSet`]s.
 //! - [`eval`]: five- and seven-card hand evaluation.
@@ -36,8 +45,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! See `docs/conventions.md` in the repository for units and value
-//! normalization, and `docs/algorithms.md` for the update rules.
+//! See [the conventions](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/conventions.md) for units and value
+//! normalization, and [the algorithms](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/algorithms.md) for the update
+//! rules.
 
 #![warn(missing_docs)]
 
