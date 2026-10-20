@@ -671,9 +671,10 @@ impl Trainer {
     ///
     /// # Errors
     /// Returns a [`TrainerError`] if the tree's board is illegal, the tree
-    /// does not continue from it or is malformed, a range is empty or holds invalid,
-    /// repeated, or board-blocked combos, no deal is possible, an abstraction
-    /// asks for zero buckets, or a suit-reduced tree gets an asymmetric range.
+    /// does not continue from it or is malformed, a range is empty or holds
+    /// invalid, repeated, or board-blocked combos, no deal is possible, an
+    /// abstraction asks for zero buckets, or a range is not suit-symmetric as
+    /// required above.
     pub fn new(
         tree: super::tree::Tree,
         combos: [Vec<Combo>; 2],
