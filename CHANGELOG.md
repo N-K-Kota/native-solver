@@ -6,6 +6,7 @@ release; such changes are marked **Breaking**.
 ## 0.1.0
 
 First public release, imported from the solver core of a private project.
+Licensed under MIT OR Apache-2.0.
 
 - Table-driven 5- and 7-card hand evaluator.
 - Weighted preflop ranges that expand into deterministic `Combo` lists.
