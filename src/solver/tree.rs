@@ -40,9 +40,10 @@ pub struct GameConfig {
 }
 
 impl GameConfig {
-    /// A game on `board` (3, 4, or 5 cards) with `pot` already in the middle
-    /// and `effective_stack` behind for each player. It starts with no bet
-    /// sizes, no raises, and no suit-isomorphism reduction.
+    /// A game on `board` with `pot` in the middle and `effective_stack` behind.
+    ///
+    /// `board` is the flop, turn, or river (3, 4, or 5 cards). The game starts with
+    /// no bet sizes, no raises, and no suit-isomorphism reduction.
     pub fn new(board: Vec<Card>, pot: Chips, effective_stack: Chips) -> GameConfig {
         GameConfig {
             board,
@@ -54,11 +55,11 @@ impl GameConfig {
         }
     }
 
-    /// Sets the bet and raise sizes, as fractions of the relevant pot,
-    /// reused on every street. Each amount is rounded half-to-even to a
-    /// whole [`Chips`] unit, clipped to the available stack, and
-    /// deduplicated. No all-in size is added: include a large enough
-    /// fraction for one.
+    /// Sets the bet and raise sizes, as fractions of the pot, for every street.
+    ///
+    /// Each amount is rounded half-to-even to a whole [`Chips`] unit, clipped to
+    /// the available stack, and deduplicated. No all-in size is added: include a
+    /// large enough fraction for one.
     pub fn with_bet_sizes(mut self, bet_sizes: impl Into<Vec<f64>>) -> GameConfig {
         self.bet_sizes = bet_sizes.into();
         self
@@ -71,11 +72,13 @@ impl GameConfig {
         self
     }
 
-    /// Groups chance-node deals by suit-isomorphism class (see
-    /// `docs/conventions.md`): cards of the same rank whose suits are both
-    /// absent from the board are strategically interchangeable, so the tree
-    /// recurses once per class and the trainer derives the other members'
-    /// values by relabeling suits. Off by default.
+    /// Groups strategically identical chance cards to shrink the tree.
+    ///
+    /// Cards of the same rank whose suits are both absent from the board are
+    /// interchangeable, so the tree recurses once per such class and the trainer
+    /// derives the other members' values by relabeling suits. Results match the
+    /// unreduced tree (see [the conventions](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/conventions.md)). Off by
+    /// default.
     pub fn with_suit_isomorphism(mut self, suit_isomorphism: bool) -> GameConfig {
         self.suit_isomorphism = suit_isomorphism;
         self
@@ -160,11 +163,13 @@ pub enum Action {
 /// How a hand ends, with the payoffs the solver uses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Terminal {
-    /// A player folded and `winner` takes the pot; `invested` is each player's total
-    /// contribution to the pot at this point (including the pre-street
-    /// `pot`, split evenly as each player's baseline), in input chips. Built
-    /// trees derive these from exact [`Chips`]; they stay `f64` because they are
-    /// the payoffs the solver kernels consume.
+    /// A player folded and `winner` takes the pot.
+    ///
+    /// `invested` is each player's total contribution to the pot at this point
+    /// (including the pre-street `pot`, split evenly as each player's
+    /// baseline), in input chips. Built trees derive these from exact
+    /// [`Chips`]; they stay `f64` because they are the payoffs the solver
+    /// kernels consume.
     Fold {
         /// The player who did not fold.
         winner: Player,
@@ -195,13 +200,14 @@ pub enum Node {
         /// One subtree per action, in the same order as `actions`.
         children: Vec<Node>,
     },
-    /// Deals the next community card, grouped into suit-isomorphism
-    /// classes (see [`GameConfig::suit_isomorphism`]): each entry is one
-    /// class's member cards plus the subtree built from its representative
-    /// (`members[0]`). With isomorphism disabled every class is a
-    /// singleton, so this is equivalent to one child per undealt card (52
-    /// minus however many board cards have been dealt so far along this
-    /// path).
+    /// Deals the next community card.
+    ///
+    /// Cards are grouped into suit-isomorphism classes (see
+    /// [`GameConfig::suit_isomorphism`]): each entry is one class's member
+    /// cards plus the subtree built from its representative (`members[0]`).
+    /// With isomorphism disabled every class is a singleton, so this is
+    /// equivalent to one child per undealt card (52 minus however many board
+    /// cards have been dealt so far along this path).
     Chance {
         /// `(class members, subtree)` per suit-isomorphism class.
         children: Vec<(Vec<Card>, Node)>,
@@ -338,8 +344,28 @@ pub struct Tree {
     pub num_decision_nodes: usize,
 }
 
-/// Builds the full betting tree for `cfg`. Use [`build_tree_bounded`] for
-/// untrusted input, since the tree can grow very large.
+/// Builds the full betting tree for `cfg`.
+///
+/// The tree can grow very large; use [`build_tree_bounded`] for untrusted
+/// input.
+///
+/// # Examples
+///
+/// ```
+/// use native_solver::{build_tree, Card, Chips, GameConfig, Node};
+///
+/// let board = ["Ks", "Th", "7s", "4d"]
+///     .iter()
+///     .map(|card| card.parse())
+///     .collect::<Result<Vec<Card>, _>>()?;
+/// let config = GameConfig::new(board, Chips::whole(100), Chips::whole(200)).with_bet_sizes([0.5]);
+/// let tree = build_tree(&config)?;
+///
+/// // OOP acts first, and decision ids run from 0.
+/// assert!(matches!(tree.root, Node::Decision { id: 0, .. }));
+/// assert!(tree.num_decision_nodes > 0);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 ///
 /// # Errors
 /// Returns an error if the board is not a legal flop, turn, or river, the
@@ -349,9 +375,11 @@ pub fn build_tree(cfg: &GameConfig) -> Result<Tree, TreeError> {
     build_tree_bounded(cfg, usize::MAX)
 }
 
-/// Stops construction before allocating a decision beyond the supplied budget.
-/// Callers must also bound input size and recursion depth (notably max_raises).
-/// Successful trees preserve the same node IDs and actions as [`build_tree`].
+/// Builds the betting tree, stopping once it would exceed `max_decision_nodes`.
+///
+/// Callers must also bound input size and recursion depth (notably
+/// `max_raises`). Successful trees have the same node ids and actions as
+/// [`build_tree`].
 ///
 /// # Errors
 /// Returns the same configuration errors as [`build_tree`], or

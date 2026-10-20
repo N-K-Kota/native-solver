@@ -28,9 +28,10 @@ pub const SUITS: &str = "cdhs";
 pub struct Card(pub(crate) u8);
 
 impl Card {
-    /// The card with rank index `rank` in `0..13` (0 = "2", 12 = "A") and suit
-    /// index `suit` in `0..4` (clubs, diamonds, hearts, spades), or `None`
-    /// if either is out of range.
+    /// The card with the given rank and suit, or `None` if either is out of range.
+    ///
+    /// `rank` is in `0..13` (0 = "2", 12 = "A") and `suit` in `0..4` (clubs,
+    /// diamonds, hearts, spades).
     pub const fn new(rank: u8, suit: u8) -> Option<Card> {
         if rank < 13 && suit < 4 {
             Some(Card(rank * 4 + suit))

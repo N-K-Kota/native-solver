@@ -14,8 +14,21 @@ pub const CHIP_SCALE: i64 = 1000;
 /// exact in `f64`, so the conversion back for payoffs is lossless.
 const MAX_UNITS: f64 = 9_007_199_254_740_992.0;
 
-/// An exact chip amount, stored as an integer count of `1 / CHIP_SCALE`
-/// input chips. Build one with [`Chips::whole`] or [`Chips::from_f64`].
+/// An exact chip amount, stored as a whole number of `1 / CHIP_SCALE` chips.
+///
+/// Integer amounts make all-in detection, raise eligibility, and bet
+/// deduplication exact, and keep the tree's shape independent of the scale of
+/// the inputs. Build one with [`Chips::whole`] or [`Chips::from_f64`].
+///
+/// # Examples
+///
+/// ```
+/// use native_solver::Chips;
+///
+/// assert_eq!(Chips::from_f64(2.5), Some(Chips::whole(2) + Chips::from_f64(0.5).unwrap()));
+/// assert_eq!(Chips::from_f64(0.0001), None); // finer than 1/1000 of a chip
+/// assert_eq!(Chips::whole(3).to_string(), "3");
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Chips(pub(crate) i64);
 
@@ -46,10 +59,11 @@ impl Chips {
         self.0
     }
 
-    /// Converts an input-chip amount that is a multiple of `1 / CHIP_SCALE`
-    /// (allowing only `f64` representation error). Returns `None` for
-    /// non-finite, out-of-range, or finer-grained amounts instead of silently
-    /// solving a different game than the caller described.
+    /// Converts an amount of chips, if it is a whole number of `1 / CHIP_SCALE` units.
+    ///
+    /// Only `f64` representation error is tolerated. Returns `None` for non-finite,
+    /// out-of-range, or finer-grained amounts rather than silently solving a
+    /// different game than the caller described.
     pub fn from_f64(amount: f64) -> Option<Chips> {
         let scaled = amount * CHIP_SCALE as f64;
         if !scaled.is_finite() || scaled.abs() > MAX_UNITS {
@@ -65,9 +79,9 @@ impl Chips {
         self.0 as f64 / CHIP_SCALE as f64
     }
 
-    /// `fraction` of this amount, rounded half-to-even to a whole unit. The
-    /// only floating-point step in sizing; non-finite or negative results
-    /// become zero or negative and are discarded by the tree builder.
+    /// `fraction` of this amount, rounded half-to-even to a whole unit.
+    ///
+    /// Non-finite or negative results become zero or negative amounts.
     pub fn fraction(self, fraction: f64) -> Chips {
         // `as` saturates out-of-range values and maps NaN to 0.
         Chips((self.0 as f64 * fraction).round_ties_even() as i64)

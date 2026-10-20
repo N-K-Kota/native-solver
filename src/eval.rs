@@ -1,29 +1,47 @@
-//! Hand evaluation. [`evaluate_5`] scores an exact 5-card hand; [`evaluate_7`]
-//! scores the best 5-card hand out of 7 cards (hole cards + board).
+//! Poker hand strength: [`evaluate_5`] for exactly five cards and
+//! [`evaluate_7`] for the best five of seven (two hole cards and a board).
 //!
-//! [`evaluate_5`] is table-driven for speed, since CFR calls it an enormous
-//! number of times. Every 5-card hand falls into one of two cases:
+//! Both return a [`HandStrength`]; stronger hands compare greater, and equal
+//! strengths split the pot.
 //!
-//! - **All 5 ranks distinct**: straight/flush/high-card only (a repeated
-//!   rank is impossible here, so no pair-or-better). Which of the 13
-//!   ranks are present is a 13-bit bitmask (0..8192); `TABLES.straight_high`
-//!   and `TABLES.high_card_tiebreak`, precomputed once and indexed directly
-//!   by that bitmask, give the answer with no branching or sorting.
-//! - **A rank repeats**: pair or better. Two cards can never share both
-//!   rank and suit, so a repeated rank makes a flush structurally
-//!   impossible — the hand's category is fully determined by the
-//!   *multiset* of ranks alone. Assigning each rank a distinct prime and
-//!   multiplying the 5 cards' primes gives a product that's unique per
-//!   multiset (unique prime factorization), so `TABLES.paired` (keyed by
-//!   that product) looks the score up directly.
+//! ```
+//! use native_solver::{evaluate_7, Card, HandCategory};
 //!
-//! Both tables are built once, lazily, from `evaluate_5_reference` — the
-//! original correctness-first implementation (grouping + sorting, checked
-//! all 21 5-card subsets' worth of hand types by hand in earlier
-//! milestones) — kept around purely as the oracle for table generation and
-//! for the exhaustive cross-check test below. [`evaluate_5`] and
-//! `evaluate_5_reference` are checked equal across all C(52,5) = 2,598,960
-//! possible 5-card hands, not just a handful of examples.
+//! let cards = |s: &str| -> Vec<Card> { s.split(' ').map(|c| c.parse().unwrap()).collect() };
+//! let board = cards("Ks Th 7s 4d 2s");
+//! let hand = |hole: &str| {
+//!     let all: Vec<Card> = cards(hole).into_iter().chain(board.iter().copied()).collect();
+//!     evaluate_7(all.try_into().unwrap())
+//! };
+//! assert!(hand("As 9s") > hand("Kd Kc")); // a flush beats a set
+//! assert_eq!(hand("As 9s").category(), HandCategory::Flush);
+//! ```
+
+// Implementation notes.
+//
+// `evaluate_5` is table-driven for speed, since CFR calls it an enormous
+// number of times. Every 5-card hand falls into one of two cases:
+//
+// - **All 5 ranks distinct**: straight/flush/high-card only (a repeated
+//   rank is impossible here, so no pair-or-better). Which of the 13
+//   ranks are present is a 13-bit bitmask (0..8192); `TABLES.straight_high`
+//   and `TABLES.high_card_tiebreak`, precomputed once and indexed directly
+//   by that bitmask, give the answer with no branching or sorting.
+// - **A rank repeats**: pair or better. Two cards can never share both
+//   rank and suit, so a repeated rank makes a flush structurally
+//   impossible — the hand's category is fully determined by the
+//   *multiset* of ranks alone. Assigning each rank a distinct prime and
+//   multiplying the 5 cards' primes gives a product that's unique per
+//   multiset (unique prime factorization), so `TABLES.paired` (keyed by
+//   that product) looks the score up directly.
+//
+// Both tables are built once, lazily, from `evaluate_5_reference` — the
+// original correctness-first implementation (grouping + sorting, checked
+// all 21 5-card subsets' worth of hand types by hand in earlier
+// milestones) — kept around purely as the oracle for table generation and
+// for the exhaustive cross-check test below. `evaluate_5` and
+// `evaluate_5_reference` are checked equal across all C(52,5) = 2,598,960
+// possible 5-card hands, not just a handful of examples.
 
 use crate::card::Card;
 use std::collections::HashMap;
@@ -62,8 +80,9 @@ pub enum HandCategory {
     StraightFlush,
 }
 
-/// The strength of a five-card poker hand, as returned by [`evaluate_5`] and
-/// [`evaluate_7`]. Stronger hands compare greater; equal strengths split the
+/// The strength of a five-card poker hand; stronger hands compare greater.
+///
+/// [`evaluate_5`] and [`evaluate_7`] return it. Equal strengths split the
 /// pot.
 ///
 /// ```
@@ -138,11 +157,9 @@ fn straight_high(ranks_desc: &[u8]) -> Option<u8> {
     Some(ranks_desc[0])
 }
 
-/// Original correctness-first [`evaluate_5`]: groups ranks by count and sorts,
-/// checking every case explicitly. Kept (and `pub`, for `benches/`) as the
-/// oracle table generation and the exhaustive test below cross-check the
-/// fast path against — not used on the hot path, not the function to call.
-/// Hidden from the documented API; it may change without notice.
+/// Slow, case-by-case [`evaluate_5`], kept as a test and benchmark oracle.
+///
+/// Not part of the documented API; it may change without notice.
 #[doc(hidden)]
 pub fn evaluate_5_reference(cards: [Card; 5]) -> u32 {
     let mut rank_counts = [0u8; 13];
