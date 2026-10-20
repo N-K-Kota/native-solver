@@ -4,10 +4,10 @@ use native_solver::solver::TrainerOptions;
 use native_solver::solver::{
     build_tree, CardAbstraction, GameConfig, Node, SolverAlgorithm, Trainer, UpdateSchedule,
 };
-use native_solver::{card_from_str, evaluate_7, Card, Combo};
+use native_solver::{evaluate_7, Card, Combo};
 
 fn card(s: &str) -> Card {
-    card_from_str(s).unwrap()
+    s.parse::<Card>().unwrap()
 }
 fn river_fixture(algorithm: SolverAlgorithm, bucketed: bool) -> (Trainer, usize) {
     scheduled_fixture(algorithm, bucketed, UpdateSchedule::Simultaneous)
@@ -18,14 +18,11 @@ fn scheduled_fixture(
     schedule: UpdateSchedule,
 ) -> (Trainer, usize) {
     let board = ["2h", "7c", "9d", "Jc", "4s"].map(card).to_vec();
-    let tree = build_tree(&GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(200),
-        bet_sizes: vec![0.5, 1.0],
-        max_raises: 1,
-        suit_isomorphism: false,
-    })
+    let tree = build_tree(
+        &GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(200))
+            .with_bet_sizes([0.5, 1.0])
+            .with_max_raises(1),
+    )
     .unwrap();
     let nodes = tree.num_decision_nodes;
     let combos = [
@@ -43,7 +40,6 @@ fn scheduled_fixture(
     (
         Trainer::new(
             tree,
-            board,
             combos,
             TrainerOptions {
                 algorithm,
@@ -181,7 +177,7 @@ fn chunked_training_is_bit_identical_to_one_batch() {
                     "{algorithm:?}, bucketed={bucketed}, node={id}"
                 );
             }
-            assert_eq!(chunks.evaluate().1, whole.evaluate().1);
+            assert_eq!(chunks.evaluate().root_values, whole.evaluate().root_values);
             assert_eq!(chunks.exploitability().total, whole.exploitability().total);
             // Equal averages alone do not guarantee equal hidden regrets.
             assert_eq!(chunks.train(3), whole.train(3));
@@ -208,14 +204,7 @@ fn kuhn_equivalent_config() -> (GameConfig, WeightedCombos) {
     };
     assert!(score(combos[0]) < score(combos[1]));
     assert!(score(combos[1]) < score(combos[2]));
-    let config = GameConfig {
-        board,
-        pot: Chips::whole(2),
-        effective_stack: Chips::whole(1),
-        bet_sizes: vec![0.5],
-        max_raises: 0,
-        suit_isomorphism: false,
-    };
+    let config = GameConfig::new(board, Chips::whole(2), Chips::whole(1)).with_bet_sizes([0.5]);
     (config, [combos.clone(), combos])
 }
 
@@ -228,7 +217,6 @@ fn legacy_boolean_constructor_keeps_its_algorithm_and_trajectory() {
     ] {
         let mut legacy = Trainer::new(
             build_tree(&config).unwrap(),
-            config.board.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm: if plus {
@@ -242,7 +230,6 @@ fn legacy_boolean_constructor_keeps_its_algorithm_and_trajectory() {
         .unwrap();
         let mut explicit = Trainer::new(
             build_tree(&config).unwrap(),
-            config.board.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm,
@@ -296,7 +283,6 @@ fn every_algorithm_converges_to_known_kuhn_value_and_policy() {
             let facing_bet = *facing_bet;
             let mut trainer = Trainer::new(
                 tree,
-                config.board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm,
@@ -308,7 +294,7 @@ fn every_algorithm_converges_to_known_kuhn_value_and_policy() {
             trainer.train(20_000);
             // evaluate() returns raw joint-range weighted totals. There are
             // six unit-weight legal deals, so divide by six for chips/deal.
-            let ev = trainer.evaluate().1[0] / 6.0;
+            let ev = trainer.evaluate().root_values[0] / 6.0;
             let exploitability = trainer.exploitability().total;
             eprintln!("{algorithm:?}: value={ev}, exploitability={exploitability}");
             assert!((ev + 1.0 / 18.0).abs() < 0.001, "{algorithm:?}: EV={ev}");
@@ -348,14 +334,9 @@ fn bucket_average_ignores_combos_blocked_by_the_dealt_card() {
     // and it has zero reach, so no reach may enter that bucket's average:
     // it must stay uniform.
     let turn = ["2h", "7c", "9d", "Jc"].map(card).to_vec();
-    let tree = build_tree(&GameConfig {
-        board: turn.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(100),
-        bet_sizes: vec![1.0],
-        max_raises: 0,
-        suit_isomorphism: false,
-    })
+    let tree = build_tree(
+        &GameConfig::new(turn.clone(), Chips::whole(100), Chips::whole(100)).with_bet_sizes([1.0]),
+    )
     .unwrap();
     let combos = [
         vec![
@@ -371,7 +352,7 @@ fn bucket_average_ignores_combos_blocked_by_the_dealt_card() {
         },
         ..TrainerOptions::default()
     };
-    let mut trainer = Trainer::new(tree, turn.clone(), combos, options).unwrap();
+    let mut trainer = Trainer::new(tree, combos, options).unwrap();
     trainer.train(50);
 
     fn river_decisions(node: &Node, out: &mut Vec<usize>) {

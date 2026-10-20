@@ -26,12 +26,11 @@ use super::terminal::{BoardOrder, TerminalIndex};
 use super::tree::{validate_board, BoardError, Node, Player, Terminal};
 #[cfg(test)]
 use crate::card::CardSet;
-use crate::card::{rank, set_contains, set_from_cards, suit, Card};
-use crate::eval::evaluate_7;
+use crate::card::{bit, mask_has, mask_of, Card};
+use crate::eval::score_7;
 use crate::range::Combo;
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 mod reach_scratch;
@@ -76,7 +75,7 @@ impl TrainingPass {
 
 /// Learning state for one game: regret and strategy-sum tables plus the
 /// update policy. The immutable game definition is shared as
-/// `Arc<SolverGame>` (`Trainer` derefs to it), so a `Policy` snapshot can be
+/// `Arc<SolverGame>` (see [`Trainer::game`]), so a [`Policy`] snapshot can be
 /// evaluated without touching, or waiting for, the training tables.
 pub struct Trainer {
     game: Arc<SolverGame>,
@@ -87,18 +86,11 @@ pub struct Trainer {
     node_data: Vec<Mutex<NodeData>>,
 }
 
-impl Deref for Trainer {
-    type Target = SolverGame;
-    fn deref(&self) -> &SolverGame {
-        &self.game
-    }
-}
-
 /// Normalized, suit-symmetrized average strategy for every decision node,
 /// in bucket coordinates (`[node][action][bucket]`), taken at an iteration
-/// boundary. Pass it to `SolverGame`'s read methods; it is independent of
+/// boundary. Pass it to [`SolverGame`]'s read methods; it is independent of
 /// later training.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
     rows: Vec<Vec<Vec<f64>>>,
 }
@@ -110,8 +102,9 @@ impl Policy {
     }
 }
 
-/// Why persisted policy rows do not fit a game (see `SolverGame::policy_from_rows`).
+/// Why persisted policy rows do not fit a game (see [`SolverGame::policy_from_rows`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PolicyError {
     /// The policy has a different number of decision nodes than the game.
     NodeCount {
@@ -156,11 +149,12 @@ impl std::error::Error for PolicyError {}
 
 /// Why [`Trainer::new`] rejected its inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrainerError {
-    /// The initial board is not a legal flop, turn, or river.
+    /// The tree's board is not a legal flop, turn, or river.
     Board(BoardError),
-    /// The tree does not continue from the initial board: it reaches a
-    /// showdown before the river, or deals a card past the river.
+    /// The tree's nodes do not continue from its board: they reach a
+    /// showdown before the river, or deal a card past the river.
     TreeBoardMismatch,
     /// The tree is malformed: decision ids are not exactly
     /// `0..num_decision_nodes`, actions and children differ in length, a
@@ -176,7 +170,7 @@ pub enum TrainerError {
         /// The player whose range is empty.
         player: Player,
     },
-    /// A combo has a card outside `0..52` or the same card twice.
+    /// A combo holds the same card twice.
     InvalidCombo {
         /// The player whose range holds the combo.
         player: Player,
@@ -228,10 +222,9 @@ impl std::fmt::Display for TrainerError {
             Self::EmptyRange { player } => {
                 write!(f, "{player:?} range has no combo with positive weight")
             }
-            Self::InvalidCombo { player, index } => write!(
-                f,
-                "{player:?} combo {index} must hold two distinct cards in 0..52"
-            ),
+            Self::InvalidCombo { player, index } => {
+                write!(f, "{player:?} combo {index} must hold two distinct cards")
+            }
             Self::DuplicateCombo { player, index } => {
                 write!(f, "{player:?} combo {index} repeats an earlier combo")
             }
@@ -270,13 +263,13 @@ impl From<BoardError> for TrainerError {
     }
 }
 
-/// Rejects inputs that `Trainer` cannot solve as a legal game.
+/// Rejects inputs that [`Trainer`] cannot solve as a legal game.
 fn validate_trainer_inputs(
     tree: &super::tree::Tree,
-    initial_board: &[Card],
     combos: &[Vec<Combo>; 2],
     abstraction: CardAbstraction,
 ) -> Result<(), TrainerError> {
+    let initial_board = tree.board.as_slice();
     validate_board(initial_board)?;
     let mut seen_ids = vec![false; tree.num_decision_nodes];
     validate_tree(&tree.root, &mut initial_board.to_vec(), &mut seen_ids)?;
@@ -286,13 +279,13 @@ fn validate_trainer_inputs(
         });
     }
 
-    let board = set_from_cards(initial_board);
+    let board = mask_of(initial_board);
     let mut masks = [Vec::new(), Vec::new()];
     for (p, player) in [Player::Oop, Player::Ip].into_iter().enumerate() {
         let mut seen = std::collections::HashSet::new();
         for (index, combo) in combos[p].iter().enumerate() {
             let [a, b] = combo.cards;
-            if a >= 52 || b >= 52 || a == b {
+            if a == b {
                 return Err(TrainerError::InvalidCombo { player, index });
             }
             if !combo.weight.is_finite() || combo.weight < 0.0 {
@@ -301,11 +294,11 @@ fn validate_trainer_inputs(
             if !seen.insert(normalize_pair(a, b)) {
                 return Err(TrainerError::DuplicateCombo { player, index });
             }
-            if combo.mask() & board != 0 {
+            if combo.bits() & board != 0 {
                 return Err(TrainerError::ComboConflictsWithBoard { player, index });
             }
             if combo.weight > 0.0 {
-                masks[p].push(combo.mask());
+                masks[p].push(combo.bits());
             }
         }
         if masks[p].is_empty() {
@@ -332,7 +325,7 @@ fn validate_trainer_inputs(
         || (abstraction.turn.is_some() && initial_board.len() <= 4);
     if reduced || averaged_buckets {
         let free: Vec<u8> = (0..4)
-            .filter(|&s| !initial_board.iter().any(|&c| suit(c) == s))
+            .filter(|&s| !initial_board.iter().any(|&c| c.suit() == s))
             .collect();
         for (p, player) in [Player::Oop, Player::Ip].into_iter().enumerate() {
             let weights: HashMap<(Card, Card), f64> = combos[p]
@@ -359,7 +352,7 @@ fn validate_trainer_inputs(
     Ok(())
 }
 
-/// Checks the structure `Trainer` relies on while walking `node` from `board`.
+/// Checks the structure [`Trainer`] relies on while walking `node` from `board`.
 fn validate_tree(
     node: &Node,
     board: &mut Vec<Card>,
@@ -389,17 +382,17 @@ fn validate_tree(
             if board.len() >= 5 {
                 return Err(TrainerError::TreeBoardMismatch);
             }
-            let mut dealt = set_from_cards(board);
+            let mut dealt = mask_of(board);
             let mut count = 0;
             for (members, _) in children {
                 if members.is_empty() {
                     return invalid("chance classes must not be empty");
                 }
                 for &card in members {
-                    if card >= 52 || set_contains(dealt, card) {
+                    if mask_has(dealt, card) {
                         return invalid("chance nodes must deal each undealt card exactly once");
                     }
-                    dealt |= 1u64 << card;
+                    dealt |= bit(card);
                     count += 1;
                 }
                 // Grouped cards are derived from `members[0]` by swapping two
@@ -407,8 +400,8 @@ fn validate_tree(
                 // board and the ranks match.
                 if members.len() > 1
                     && members.iter().any(|&card| {
-                        rank(card) != rank(members[0])
-                            || board.iter().any(|&b| suit(b) == suit(card))
+                        card.rank() != members[0].rank()
+                            || board.iter().any(|&b| b.suit() == card.suit())
                     })
                 {
                     return invalid(
@@ -446,12 +439,12 @@ fn validate_tree(
 
 /// Everything about a solve that training never changes: the tree, ranges,
 /// board caches, card abstraction, and suit-symmetry groups. Read methods
-/// (`evaluate`, `exploitability`, `average_strategy`) take a `Policy`.
+/// (`evaluate`, `exploitability`, `average_strategy`) take a [`Policy`].
 pub struct SolverGame {
     tree: super::tree::Tree,
     initial_board: Vec<Card>,
     combos: [Vec<Combo>; 2],
-    /// `evaluate_7` scores for every complete (5-card) board reachable via
+    /// [`evaluate_7`] scores for every complete (5-card) board reachable via
     /// a `Chance` node, precomputed once so `train()` doesn't recompute
     /// hand strengths for the same board on every iteration.
     board_eval_cache: HashMap<Vec<Card>, [Vec<u32>; 2]>,
@@ -464,11 +457,11 @@ pub struct SolverGame {
     terminal_index: TerminalIndex,
     board_order_cache: HashMap<Vec<Card>, BoardOrder>,
     /// Per-street card abstraction setting this trainer was built with —
-    /// see `CardAbstraction` and the module doc comment's "card
+    /// see [`CardAbstraction`] and the module doc comment's "card
     /// abstraction" section. `CardAbstraction::default()` never buckets.
     abstraction: CardAbstraction,
     /// Per board (any length reachable by a Decision node — flop/turn use
-    /// `avg_score`, river uses the real `evaluate_7` score), per player:
+    /// `avg_score`, river uses the real [`evaluate_7`] score), per player:
     /// combo index -> bucket index. Only populated for streets
     /// `abstraction` actually buckets.
     bucket_maps: HashMap<Vec<Card>, [Vec<usize>; 2]>,
@@ -493,9 +486,9 @@ pub struct SolverGame {
 }
 
 /// How a [`Trainer`] learns: the regret/averaging rule, the player-update
-/// order, and per-street card abstraction. `Default` is CFR+ with
+/// order, and per-street card abstraction. `Default` is DCFR with
 /// simultaneous updates and every street solved exactly.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TrainerOptions {
     /// The regret and strategy-averaging rule.
     pub algorithm: SolverAlgorithm,
@@ -511,7 +504,7 @@ pub struct TrainerOptions {
 /// so there can be fewer than `n`. `None` solves the street exactly, and
 /// `Default` (all `None`) never buckets. Flop and turn buckets use the mean
 /// river score over the remaining runouts; river buckets use the exact score.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct CardAbstraction {
     /// Bucket count for decisions on a 3-card board.
     pub flop: Option<usize>,
@@ -521,7 +514,19 @@ pub struct CardAbstraction {
     pub river: Option<usize>,
 }
 
-/// `SolverGame::evaluate`'s result for one decision node — per combo, for
+/// [`SolverGame::evaluate`]'s result: per-node values under a policy.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Evaluation {
+    /// One entry per decision node, indexed by node id.
+    pub nodes: Vec<NodeEvaluation>,
+    /// Root `[OOP, IP]` raw range-weighted values: zero-sum like
+    /// [`Trainer::train`]'s return, but under the evaluated policy. Not EVs;
+    /// see `docs/conventions.md`.
+    pub root_values: [f64; 2],
+}
+
+/// [`SolverGame::evaluate`]'s result for one decision node — per combo, for
 /// the acting player, under the trained *average* strategy (not
 /// `train()`'s informal last-iteration current-strategy value): `ev` is
 /// the expected value from this point on (same chip units as
@@ -531,7 +536,7 @@ pub struct CardAbstraction {
 /// since a true equity figure for an incomplete board needs a genuinely
 /// separate future-runout win-probability average (not just
 /// `avg_score`'s mean future score), which isn't implemented yet.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeEvaluation {
     /// Per combo of the acting player: the node EV in input chips, i.e. the
     /// raw counterfactual value divided by the opponent's compatible reach
@@ -547,7 +552,7 @@ pub struct NodeEvaluation {
     pub equity: Option<Vec<f64>>,
 }
 
-/// `Trainer::exploitability`'s result: the standard CFR convergence metric.
+/// [`Trainer::exploitability`]'s result: the standard CFR convergence metric.
 /// `oop`/`ip` are each player's *best-response value* — the range-weighted
 /// EV they'd get by deviating to a perfect best response against the
 /// **other** player's fixed average strategy (everything else, including
@@ -560,7 +565,7 @@ pub struct NodeEvaluation {
 /// Values are expectations over compatible initial private-hand deals,
 /// normalized by their joint range weight. All fields are NaN if that
 /// weight is zero or nonfinite; callers must reject such an invalid metric.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Exploitability {
     /// OOP's best-response value against IP's average strategy, in chips.
     pub oop: f64,
@@ -570,45 +575,68 @@ pub struct Exploitability {
     pub total: f64,
 }
 
+impl std::fmt::Debug for Trainer {
+    /// A summary: the update rule, progress, and the game, not the tables.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Trainer")
+            .field("algorithm", &self.algorithm)
+            .field("update_schedule", &self.update_schedule)
+            .field("iterations_completed", &self.iterations_completed)
+            .field("game", &self.game)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for SolverGame {
+    /// A summary: board, tree size, range sizes, and abstraction.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SolverGame")
+            .field("board", &self.tree.board)
+            .field("num_decision_nodes", &self.tree.num_decision_nodes)
+            .field("num_combos", &[self.combos[0].len(), self.combos[1].len()])
+            .field("abstraction", &self.abstraction)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Trainer {
-    /// Builds a trainer for `tree`, starting on `initial_board`, with each
+    /// Builds a trainer for `tree`, starting on `tree.board`, with each
     /// player's combos (the order is kept and
     /// is the combo axis of every per-combo result). Takes ownership of
-    /// `tree` so a `Trainer` can outlive the scope that built it.
+    /// `tree` so a [`Trainer`] can outlive the scope that built it.
     ///
     /// `options` selects the regret/averaging rule, the player-update order
     /// (fixed for this trainer's lifetime, including across training batches;
     /// an alternating iteration is an OOP pass followed by an IP pass) and
-    /// per-street card abstraction. `TrainerOptions::default()` is CFR+ with
+    /// per-street card abstraction. `TrainerOptions::default()` is DCFR with
     /// simultaneous updates and no abstraction.
     ///
     /// Trees with grouped chance cards require ranges closed under every
     /// board-free suit swap, with equal weights for the corresponding combos.
-    /// Canonical `Range` inputs satisfy this after initial-board removal.
+    /// Canonical [`Range`](crate::Range) inputs satisfy this after initial-board removal.
     ///
     /// # Errors
-    /// Returns a [`TrainerError`] if the board is illegal, the tree does not
-    /// continue from it or is malformed, a range is empty or holds invalid,
+    /// Returns a [`TrainerError`] if the tree's board is illegal, the tree
+    /// does not continue from it or is malformed, a range is empty or holds invalid,
     /// repeated, or board-blocked combos, no deal is possible, an abstraction
     /// asks for zero buckets, or a suit-reduced tree gets an asymmetric range.
     pub fn new(
         tree: super::tree::Tree,
-        initial_board: Vec<Card>,
         combos: [Vec<Combo>; 2],
         options: TrainerOptions,
     ) -> Result<Self, TrainerError> {
-        validate_trainer_inputs(&tree, &initial_board, &combos, options.abstraction)?;
-        Ok(Self::new_unchecked(tree, initial_board, combos, options))
+        validate_trainer_inputs(&tree, &combos, options.abstraction)?;
+        Ok(Self::new_unchecked(tree, combos, options))
     }
 
     /// `new` without input validation, for tests that drive the terminal
     /// kernels with deliberately degenerate ranges.
     fn new_unchecked(
         tree: super::tree::Tree,
-        initial_board: Vec<Card>,
         combos: [Vec<Combo>; 2],
         options: TrainerOptions,
     ) -> Self {
+        let initial_board = tree.board.clone();
         let TrainerOptions {
             algorithm,
             schedule: update_schedule,
@@ -635,7 +663,7 @@ impl Trainer {
             .map(|(board, scores)| {
                 (
                     board.clone(),
-                    BoardOrder::new(&combos, scores, set_from_cards(board)),
+                    BoardOrder::new(&combos, scores, mask_of(board)),
                 )
             })
             .collect();
@@ -771,6 +799,9 @@ impl Trainer {
     /// strategy (informal — use `average_strategy` for the converged
     /// policy, which is stable across iterations). For alternating updates,
     /// the return is from the final IP pass, after OOP updated and before IP updates.
+    ///
+    /// # Panics
+    /// Panics if the total iteration count would overflow `u64`.
     pub fn train(&mut self, iterations: u32) -> [f64; 2] {
         let mut last = [0.0, 0.0];
         // Borrow the shared game, not `self`, so the iteration clock can advance.
@@ -784,8 +815,8 @@ impl Trainer {
                 .checked_add(1)
                 .expect("CFR iteration counter overflow");
             let update = self.algorithm.iteration(iteration);
-            let reach0: Vec<f64> = self.combos[0].iter().map(|c| c.weight).collect();
-            let reach1: Vec<f64> = self.combos[1].iter().map(|c| c.weight).collect();
+            let reach0: Vec<f64> = self.game.combos[0].iter().map(|c| c.weight).collect();
+            let reach1: Vec<f64> = self.game.combos[1].iter().map(|c| c.weight).collect();
             let reach = [reach0.as_slice(), reach1.as_slice()];
             let pass = match self.update_schedule {
                 UpdateSchedule::Simultaneous => TrainingPass {
@@ -795,7 +826,7 @@ impl Trainer {
                 },
                 UpdateSchedule::Alternating => {
                     self.cfr(
-                        &self.tree.root,
+                        &self.game.tree.root,
                         reach,
                         &board,
                         board_eval,
@@ -815,15 +846,15 @@ impl Trainer {
                     }
                 }
             };
-            let [cfv0, cfv1] = self.cfr(&self.tree.root, reach, &board, board_eval, pass);
+            let [cfv0, cfv1] = self.cfr(&self.game.tree.root, reach, &board, board_eval, pass);
             let ev0: f64 = cfv0
                 .iter()
-                .zip(&self.combos[0])
+                .zip(&self.game.combos[0])
                 .map(|(v, c)| v * c.weight)
                 .sum();
             let ev1: f64 = cfv1
                 .iter()
-                .zip(&self.combos[1])
+                .zip(&self.game.combos[1])
                 .map(|(v, c)| v * c.weight)
                 .sum();
             last = [ev0, ev1];
@@ -846,18 +877,21 @@ impl Trainer {
         }
     }
 
-    /// `SolverGame::evaluate` under the current average strategy.
-    pub fn evaluate(&self) -> (HashMap<usize, NodeEvaluation>, [f64; 2]) {
+    /// [`SolverGame::evaluate`] under the current average strategy.
+    pub fn evaluate(&self) -> Evaluation {
         self.game.evaluate(&self.policy())
     }
 
-    /// `SolverGame::exploitability` under the current average strategy.
+    /// [`SolverGame::exploitability`] under the current average strategy.
     pub fn exploitability(&self) -> Exploitability {
         self.game.exploitability(&self.policy())
     }
 
     /// The trained average strategy for one decision node, as
-    /// `[action][combo]` (see `SolverGame::average_strategy`).
+    /// `[action][combo]` (see [`SolverGame::average_strategy`]).
+    ///
+    /// # Panics
+    /// Panics if `node_id` is not below [`SolverGame::num_decision_nodes`].
     pub fn average_strategy(&self, node_id: usize) -> Vec<Vec<f64>> {
         self.game
             .expand_strategy(node_id, &self.average_bucket_strategy(node_id))
@@ -865,8 +899,8 @@ impl Trainer {
 
     /// Normalized strategy sums in bucket coordinates, suit-symmetrized.
     fn average_bucket_strategy(&self, node_id: usize) -> Vec<Vec<f64>> {
-        let (player, board) = &self.node_meta[node_id];
-        let (num_buckets, _) = self.combo_buckets(*player, board);
+        let (player, board) = &self.game.node_meta[node_id];
+        let (num_buckets, _) = self.game.combo_buckets(*player, board);
         let data = self.node_data[node_id].lock().unwrap();
         let num_actions = data.regret_sum.len();
         let mut bucket_strategy: Vec<Vec<f64>> = (0..num_actions)
@@ -883,7 +917,7 @@ impl Trainer {
                     .collect()
             })
             .collect();
-        self.symmetrize_strategy(node_id, &mut bucket_strategy);
+        self.game.symmetrize_strategy(node_id, &mut bucket_strategy);
         bucket_strategy
     }
 
@@ -907,7 +941,7 @@ impl Trainer {
                 }
             }
         }
-        self.symmetrize_strategy(id, &mut strategy);
+        self.game.symmetrize_strategy(id, &mut strategy);
         strategy
     }
 
@@ -926,7 +960,8 @@ impl Trainer {
         match node {
             Node::Terminal(t) => std::array::from_fn(|p| {
                 if pass.computes(p) {
-                    self.terminal_value_for_player(t, p, reach[1 - p], board, board_eval)
+                    self.game
+                        .terminal_value_for_player(t, p, reach[1 - p], board, board_eval)
                 } else {
                     Vec::new()
                 }
@@ -939,9 +974,9 @@ impl Trainer {
                 children,
             } => {
                 let p = player.index();
-                let num_own_combos = self.combos[p].len();
-                let num_other_combos = self.combos[1 - p].len();
-                let (num_buckets, buckets) = self.combo_buckets(p, board);
+                let num_own_combos = self.game.combos[p].len();
+                let num_other_combos = self.game.combos[1 - p].len();
+                let (num_buckets, buckets) = self.game.combo_buckets(p, board);
                 let strategy = self.current_strategy(*id, actions.len(), num_buckets);
 
                 let child_cfvs: Vec<[Vec<f64>; 2]> = children
@@ -998,8 +1033,8 @@ impl Trainer {
                 // holes in a map while still sharing a bucket.
                 // Board-dead combos add no average-strategy mass, matching the
                 // bucketed path's `effective_reach` below.
-                if self.bucket_maps.is_empty() {
-                    let board_set = set_from_cards(board);
+                if self.game.bucket_maps.is_empty() {
+                    let board_set = mask_of(board);
                     let mut data = self.node_data[*id].lock().unwrap();
                     for (a, cfv) in child_cfvs.iter().enumerate() {
                         for (i, &own) in cfv[p].iter().enumerate() {
@@ -1008,7 +1043,7 @@ impl Trainer {
                             let delta = 0.0 + (own - own_cfv[i]);
                             data.regret_sum[a][i] =
                                 pass.update.regret(data.regret_sum[a][i], delta);
-                            if !self.combos[p][i].conflicts_with(board_set) {
+                            if self.game.combos[p][i].bits() & board_set == 0 {
                                 data.strategy_sum[a][i] += reach[p][i] * strategy[a][i];
                             }
                             data.strategy_sum[a][i] =
@@ -1036,11 +1071,11 @@ impl Trainer {
                 // regret update this replaces (`own[i] - own_cfv[i]`, no
                 // reach weighting at all), so this is an exact
                 // generalization, not a behavior change, for that case.
-                let board_set = set_from_cards(board);
+                let board_set = mask_of(board);
                 let effective_reach: Vec<f64> = (0..num_own_combos)
                     .map(|i| {
-                        let [h1, h2] = self.combos[p][i].cards;
-                        if set_contains(board_set, h1) || set_contains(board_set, h2) {
+                        let [h1, h2] = self.game.combos[p][i].cards;
+                        if mask_has(board_set, h1) || mask_has(board_set, h2) {
                             0.0
                         } else {
                             reach[p][i]
@@ -1100,7 +1135,7 @@ impl Trainer {
     /// (`members[0]`) is actually recursed into. Every other member's
     /// counterfactual values are derived from the representative's by
     /// `relabel_cfv` — a swap of the two suits involved is a symmetry of
-    /// the game (it doesn't change tree structure or `evaluate_7`
+    /// the game (it doesn't change tree structure or [`evaluate_7`]
     /// outcomes), so member `card`'s cfv for combo `j` equals the
     /// representative's cfv for the combo obtained by applying that same
     /// suit swap to combo `j`'s two cards. With isomorphism disabled every
@@ -1123,6 +1158,7 @@ impl Trainer {
                 child_board.push(rep);
                 let empty_eval = [Vec::new(), Vec::new()];
                 let child_board_eval = self
+                    .game
                     .board_eval_cache
                     .get(&child_board)
                     .unwrap_or(&empty_eval);
@@ -1135,7 +1171,7 @@ impl Trainer {
             vec![
                 0.0;
                 if pass.computes(p) {
-                    self.combos[p].len()
+                    self.game.combos[p].len()
                 } else {
                     0
                 }
@@ -1151,14 +1187,15 @@ impl Trainer {
                     let values = if card == rep {
                         rep_cfv[p].clone()
                     } else {
-                        self.relabel_cfv(p, &rep_cfv[p], suit(rep), suit(card))
+                        self.game
+                            .relabel_cfv(p, &rep_cfv[p], rep.suit(), card.suit())
                     };
                     for (
                         i,
                         &Combo {
                             cards: [h1, h2], ..
                         },
-                    ) in self.combos[p].iter().enumerate()
+                    ) in self.game.combos[p].iter().enumerate()
                     {
                         if h1 != card && h2 != card {
                             out[p][i] += values[i];
@@ -1189,16 +1226,15 @@ impl SolverGame {
     /// the immutable game and `policy`, so it runs concurrently with training
     /// and always describes exactly the iteration `policy` was taken at.
     ///
-    /// Returns every visited decision node's `NodeEvaluation`, keyed by
-    /// node id — computing this for a single node still requires walking
-    /// its entire subtree (unlike `average_strategy`, which is a direct
-    /// per-node lookup), so callers that need more than one node's
-    /// evaluation should call this once and read from the map, not call it
-    /// per node — plus the root's own range-weighted `[OOP, IP]` value
-    /// pair (same shape and same zero-sum property as `train()`'s return,
-    /// but under the average strategy rather than the last training
-    /// iteration's current strategy).
-    pub fn evaluate(&self, policy: &Policy) -> (HashMap<usize, NodeEvaluation>, [f64; 2]) {
+    /// Returns every decision node's [`NodeEvaluation`], indexed by node id —
+    /// computing this for a single node still requires walking its entire
+    /// subtree (unlike `average_strategy`, which is a direct per-node
+    /// lookup), so callers that need more than one node's evaluation should
+    /// call this once and index the result, not call it per node — plus the
+    /// root's own range-weighted `[OOP, IP]` value pair (same shape and
+    /// same zero-sum property as `train()`'s return, but under the given
+    /// policy rather than the last training iteration's current strategy).
+    pub fn evaluate(&self, policy: &Policy) -> Evaluation {
         let mut out = HashMap::new();
         let board = self.initial_board.clone();
         let empty_eval = [Vec::new(), Vec::new()];
@@ -1223,13 +1259,20 @@ impl SolverGame {
             .zip(&self.combos[1])
             .map(|(v, c)| v * c.weight)
             .sum();
-        (out, [ev0, ev1])
+        // `evaluate_node` visits every decision node exactly once.
+        let nodes = (0..self.node_meta.len())
+            .map(|id| out.remove(&id).expect("every decision node is evaluated"))
+            .collect();
+        Evaluation {
+            nodes,
+            root_values: [ev0, ev1],
+        }
     }
 
     /// The standard CFR convergence metric: how much either player could
     /// still gain, in expectation over their full range, by deviating from
     /// the trained average strategy to a perfect best response against the
-    /// *other* player's average strategy (see `Exploitability`'s doc
+    /// *other* player's average strategy (see [`Exploitability`]'s doc
     /// comment for the exact definition). Two independent full-tree passes
     /// — one best-responding as OOP, one as IP — via `best_response_value`,
     /// which mirrors `evaluate_node`'s structure but takes a max over
@@ -1245,10 +1288,8 @@ impl SolverGame {
         // CFVs remain unnormalized throughout recursion. Only the public
         // metric is an expectation over legal initial deals, rather than a
         // sum that changes with the size or common scale of either range.
-        let board_set = set_from_cards(&board);
-        let live = |c: &Combo| {
-            !set_contains(board_set, c.cards[0]) && !set_contains(board_set, c.cards[1])
-        };
+        let board_set = mask_of(&board);
+        let live = |c: &Combo| !mask_has(board_set, c.cards[0]) && !mask_has(board_set, c.cards[1]);
         let compatible_mass =
             self.terminal_index
                 .compatible_mass(&self.combos, 0, &reach1, board_set);
@@ -1309,20 +1350,28 @@ impl SolverGame {
         &self.tree.root
     }
 
+    /// The board the tree starts from ([`Tree::board`](crate::Tree::board)).
+    pub fn board(&self) -> &[Card] {
+        &self.tree.board
+    }
+
     /// The community cards dealt so far at decision node `node_id` (e.g.
     /// for display, or to label which card a `Chance` branch led through).
+    ///
+    /// # Panics
+    /// Panics if `node_id` is not below [`num_decision_nodes`](Self::num_decision_nodes).
     pub fn node_board(&self, node_id: usize) -> &[Card] {
         &self.node_meta[node_id].1
     }
 
-    /// The combos (`card1, card2, range_weight`) for `Player::Oop`/`Player::Ip`
-    /// (index `0`/`1`), in the same order `average_strategy`'s combo axis uses.
-    pub fn combos(&self, player_index: usize) -> &[Combo] {
-        &self.combos[player_index]
+    /// `player`'s combos, in the order of every per-combo result (the combo
+    /// axis of `average_strategy`, [`NodeEvaluation::ev`], and so on).
+    pub fn combos(&self, player: Player) -> &[Combo] {
+        &self.combos[player.index()]
     }
 
     /// The card abstraction setting this trainer was built with (see
-    /// `Trainer::new`) — a `None` field means that street's decision nodes
+    /// [`Trainer::new`]) — a `None` field means that street's decision nodes
     /// are exact (unabstracted).
     pub fn abstraction(&self) -> CardAbstraction {
         self.abstraction
@@ -1333,6 +1382,10 @@ impl SolverGame {
     /// — always combo-indexed regardless of whether this node was
     /// river-bucketed internally: every combo in a bucket reports that
     /// bucket's shared average probability.
+    ///
+    /// # Panics
+    /// Panics if `node_id` is not below [`num_decision_nodes`](Self::num_decision_nodes)
+    /// or `policy` was taken from a different game.
     pub fn average_strategy(&self, policy: &Policy, node_id: usize) -> Vec<Vec<f64>> {
         self.expand_strategy(node_id, &policy.rows[node_id])
     }
@@ -1347,12 +1400,16 @@ impl SolverGame {
             .collect()
     }
 
-    /// Rebuilds a policy persisted from `Policy::rows`, checking it fits this
+    /// Rebuilds a policy persisted from [`Policy::rows`], checking it fits this
     /// game: one row set per decision node, one row per action, one entry per
     /// bucket, each bucket a probability distribution, and suit-equivalent
     /// buckets identical. Rows are taken as given (a saved policy is already
     /// symmetrized), so reads match bit for bit; an asymmetric one is rejected
     /// because representative-only chance traversal would misreport it.
+    ///
+    /// # Errors
+    /// Returns a [`PolicyError`] naming the first node whose rows have the
+    /// wrong count or shape, are not distributions, or are not symmetric.
     pub fn policy_from_rows(&self, rows: Vec<Vec<Vec<f64>>>) -> Result<Policy, PolicyError> {
         fn action_counts(node: &Node, out: &mut [usize]) {
             match node {
@@ -1472,7 +1529,7 @@ impl SolverGame {
     }
 
     /// `evaluate()`'s recursion — mirrors `cfr()`'s structure (same
-    /// `Terminal`/`Chance`/`Decision` handling), but reads the fixed
+    /// [`Terminal`]/`Chance`/`Decision` handling), but reads the fixed
     /// `average_strategy` at each decision node instead of computing a
     /// "current" one via regret matching, and never touches `node_data`.
     /// `terminal_value` doesn't need a parallel version — it's already
@@ -1555,7 +1612,7 @@ impl SolverGame {
                 // own_ev/other_ev must stay in the raw convention so the
                 // parent's own weighted-sum aggregation and the chance-node
                 // relabeling stay correct.
-                let board_set = set_from_cards(board);
+                let board_set = mask_of(board);
                 let compatible_mass =
                     self.terminal_index
                         .compatible_mass(&self.combos, p, &reach[1 - p], board_set);
@@ -1629,8 +1686,8 @@ impl SolverGame {
                     (rep_cfv[0].clone(), rep_cfv[1].clone())
                 } else {
                     (
-                        self.relabel_cfv(0, &rep_cfv[0], suit(rep), suit(card)),
-                        self.relabel_cfv(1, &rep_cfv[1], suit(rep), suit(card)),
+                        self.relabel_cfv(0, &rep_cfv[0], rep.suit(), card.suit()),
+                        self.relabel_cfv(1, &rep_cfv[1], rep.suit(), card.suit()),
                     )
                 };
                 for (
@@ -1807,7 +1864,7 @@ impl SolverGame {
                 let val_card = if card == rep {
                     rep_val.clone()
                 } else {
-                    self.relabel_cfv(x, rep_val, suit(rep), suit(card))
+                    self.relabel_cfv(x, rep_val, rep.suit(), card.suit())
                 };
                 for (
                     i,
@@ -1831,7 +1888,7 @@ impl SolverGame {
     /// Raw showdown win probability for each of `player`'s combos against
     /// the opponent's `reach`-weighted range at this node — only valid
     /// (and only ever called) once `board_eval` is a complete board's real
-    /// `evaluate_7` scores. Excludes opponent combos blocked by the hero's
+    /// [`evaluate_7`] scores. Excludes opponent combos blocked by the hero's
     /// own two cards *and* ones that physically conflict with the board
     /// (same exclusion `showdown_cfv` uses — without it, a phantom
     /// opponent combo could still be assigned nonzero weight here even
@@ -1845,7 +1902,7 @@ impl SolverGame {
         board: &[Card],
         board_eval: &[Vec<u32>; 2],
     ) -> Vec<f64> {
-        let board_set = set_from_cards(board);
+        let board_set = mask_of(board);
         let positive_reach: Vec<f64> = reach[1 - player]
             .iter()
             .map(|&r| if r <= 0.0 { 0.0 } else { r })
@@ -1897,7 +1954,7 @@ impl SolverGame {
     ) -> Vec<f64> {
         #[cfg(test)]
         self.terminal_calls[player].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let board_set = set_from_cards(board);
+        let board_set = mask_of(board);
         #[cfg(test)]
         if self
             .use_pairwise_terminals
@@ -1906,7 +1963,7 @@ impl SolverGame {
             return (0..self.combos[player].len())
                 .map(|i| {
                     let [a, b] = self.combos[player][i].cards;
-                    if set_contains(board_set, a) || set_contains(board_set, b) {
+                    if mask_has(board_set, a) || mask_has(board_set, b) {
                         return 0.0;
                     }
                     match t {
@@ -1965,7 +2022,7 @@ impl SolverGame {
         player: usize,
         combo_idx: usize,
         reach_opp: &[f64],
-        board_set: CardSet,
+        board_set: u64,
     ) -> f64 {
         let opp = 1 - player;
         let [h1, h2] = self.combos[player][combo_idx].cards;
@@ -1983,8 +2040,8 @@ impl SolverGame {
                         && *v1 != h2
                         && *v2 != h1
                         && *v2 != h2
-                        && !set_contains(board_set, *v1)
-                        && !set_contains(board_set, *v2)
+                        && !mask_has(board_set, *v1)
+                        && !mask_has(board_set, *v2)
                 },
             )
             .map(|(_, &r)| r)
@@ -2002,7 +2059,7 @@ impl SolverGame {
         invested: &[f64; 2],
         reach_opp: &[f64],
         board_eval: &[Vec<u32>; 2],
-        board_set: CardSet,
+        board_set: u64,
     ) -> f64 {
         let opp = 1 - player;
         let [h1, h2] = self.combos[player][combo_idx].cards;
@@ -2018,7 +2075,7 @@ impl SolverGame {
             if v1 == h1 || v1 == h2 || v2 == h1 || v2 == h2 {
                 continue;
             }
-            if set_contains(board_set, v1) || set_contains(board_set, v2) {
+            if mask_has(board_set, v1) || mask_has(board_set, v2) {
                 continue;
             }
             let villain_score = board_eval[opp][j];
@@ -2062,7 +2119,7 @@ fn build_combo_index(combos: &[Combo]) -> HashMap<(Card, Card), usize> {
 /// `card` with its suit swapped to the other side of the `suit_a`/`suit_b`
 /// transposition (identity if `card` uses neither suit).
 fn swap_suit(card: Card, suit_a: u8, suit_b: u8) -> Card {
-    let s = suit(card);
+    let s = card.suit();
     let new_suit = if s == suit_a {
         suit_b
     } else if s == suit_b {
@@ -2070,11 +2127,11 @@ fn swap_suit(card: Card, suit_a: u8, suit_b: u8) -> Card {
     } else {
         s
     };
-    rank(card) * 4 + new_suit
+    Card(card.rank() * 4 + new_suit)
 }
 
-/// `evaluate_7` scores for every combo, if `board` is a complete 5-card
-/// board — otherwise empty (no `Terminal::Showdown` is ever reachable with
+/// [`evaluate_7`] scores for every combo, if `board` is a complete 5-card
+/// board — otherwise empty (no [`Terminal::Showdown`] is ever reachable with
 /// an incomplete board, so it's never read in that case).
 ///
 /// A combo whose hole card was itself dealt as one of `board`'s later
@@ -2083,7 +2140,7 @@ fn swap_suit(card: Card, suit_a: u8, suit_b: u8) -> Card {
 /// combo from every aggregate sum before it reaches the root (that's the
 /// whole point of the "N-4" private-deal normalization this module's doc comment
 /// describes), so its score here is never actually read. Skipping
-/// `evaluate_7` for it (sentinel `0`) avoids feeding it a 7-card hand that
+/// [`evaluate_7`] for it (sentinel `0`) avoids feeding it a 7-card hand that
 /// can't occur in reality — e.g. a pocket-pair combo whose two ranks-match
 /// a rank that also completes trips/quads on the board, which pushes one
 /// rank to 5 "occurrences" among the 7 cards, a pattern `eval::evaluate_5`'s
@@ -2092,12 +2149,12 @@ fn eval_combos_if_complete(combos: &[Vec<Combo>; 2], board: &[Card]) -> [Vec<u32
     if board.len() != 5 {
         return [Vec::new(), Vec::new()];
     }
-    let board_set = set_from_cards(board);
+    let board_set = mask_of(board);
     let score = |combo: &Combo| {
-        if set_contains(board_set, combo.cards[0]) || set_contains(board_set, combo.cards[1]) {
+        if mask_has(board_set, combo.cards[0]) || mask_has(board_set, combo.cards[1]) {
             return 0;
         }
-        evaluate_7([
+        score_7([
             combo.cards[0],
             combo.cards[1],
             board[0],
@@ -2114,7 +2171,7 @@ fn eval_combos_if_complete(combos: &[Vec<Combo>; 2], board: &[Card]) -> [Vec<u32
 }
 
 /// Walks every `Chance` branch once, filling `cache` with the
-/// `evaluate_7` scores for each complete board reachable from `board`.
+/// [`evaluate_7`] scores for each complete board reachable from `board`.
 fn precompute_board_eval(
     node: &Node,
     board: &[Card],
@@ -2176,13 +2233,13 @@ fn collect_reachable_boards(
 }
 
 /// Splits combos into `num_buckets` contiguous, roughly-equal-sized groups
-/// by score percentile (river: real `evaluate_7` scores; flop/turn:
+/// by score percentile (river: real [`evaluate_7`] scores; flop/turn:
 /// `avg_score`'s future-score expectation) — sorting by score and cutting
 /// every `n / num_buckets`-th combo keeps the assignment monotonic (a
 /// higher-scoring combo never lands in a lower bucket than a
 /// lower-scoring one). When `num_buckets >= scores.len()` this reduces to
 /// an exact bijection (every combo its own bucket, in score order) — the
-/// baseline `CardAbstraction`'s per-street `Some(n)` for large `n` needs
+/// baseline [`CardAbstraction`]'s per-street `Some(n)` for large `n` needs
 /// to behave identically to `None`.
 fn compute_percentile_buckets(scores: &[f64], num_buckets: usize) -> Vec<usize> {
     let n = scores.len();
@@ -2209,15 +2266,15 @@ fn compute_percentile_buckets(scores: &[f64], num_buckets: usize) -> Vec<usize> 
     bucket_of
 }
 
-/// Each combo's expected `evaluate_7` score from `board` through to the
-/// river, averaged over future streets — the proxy `CardAbstraction`'s
+/// Each combo's expected [`evaluate_7`] score from `board` through to the
+/// river, averaged over future streets — the proxy [`CardAbstraction`]'s
 /// flop/turn bucketing ranks combos by, since (unlike the river) their
 /// hand isn't final yet. This is coarser than true equity: it's a plain
 /// average of the eventual showdown *score*, not a win probability against
 /// an opponent range, so it doesn't capture *how* a hand realizes its
 /// value (e.g. a made hand with no more equity to gain and a drawing hand
 /// with the same average score play very differently in reality) — but it
-/// reuses the exact `evaluate_7` machinery already computed for real
+/// reuses the exact [`evaluate_7`] machinery already computed for real
 /// showdowns, needs no separate equity engine, and preserves the right
 /// ordering for the common case (stronger hands now tend to stay stronger).
 ///
@@ -2227,7 +2284,7 @@ fn compute_percentile_buckets(scores: &[f64], num_buckets: usize) -> Vec<usize> 
 /// always a valid equivalence, so this one-time precomputation is cheaper
 /// this way, and when the tree *was* isomorphism-reduced this also means
 /// every board it visits at the base case is already in `board_eval_cache`
-/// (zero redundant `evaluate_7` calls beyond what training needs anyway).
+/// (zero redundant [`evaluate_7`] calls beyond what training needs anyway).
 fn avg_score(
     board: &[Card],
     combos: &[Vec<Combo>; 2],
@@ -2264,7 +2321,7 @@ fn avg_score(
             // suit swap is the symmetry that maps board+`m` to board+`rep`).
             let child = avg_score(&next_board, combos, combo_index, board_eval_cache, cache);
             for &m in &members {
-                let (suit_a, suit_b) = (suit(rep), suit(m));
+                let (suit_a, suit_b) = (rep.suit(), m.suit());
                 for p in 0..2 {
                     for (
                         i,
@@ -2374,7 +2431,7 @@ fn init_node_data(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::card_from_str;
+    use crate::card::Card;
     use crate::range::Range;
     use crate::solver::tree::{build_tree, GameConfig};
     use crate::solver::Chips;
@@ -2382,7 +2439,7 @@ mod tests {
     #[test]
     fn dcfr_discounts_once_per_bucket_after_adding_the_full_iteration() {
         use crate::solver::tree::{Action, Player, Tree};
-        let c = |s| card_from_str(s).unwrap();
+        let c = |s: &str| s.parse::<Card>().unwrap();
         let board = ["2c", "3d", "7h", "8s", "9c"].map(c).to_vec();
         // Both AA combos have the same strength and merge into one bucket.
         // Unequal reaches expose mistakenly discounting after each combo.
@@ -2394,6 +2451,7 @@ mod tests {
             vec![Combo::new(c("Kh"), c("Kd"), 1.0)],
         ];
         let tree = Tree {
+            board: board.clone(),
             root: Node::Decision {
                 id: 0,
                 player: Player::Oop,
@@ -2413,7 +2471,6 @@ mod tests {
         };
         let mut trainer = Trainer::new(
             tree,
-            board,
             combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::Dcfr,
@@ -2457,7 +2514,7 @@ mod tests {
             .build()
             .unwrap();
         pool.install(|| {
-            let c = |s| card_from_str(s).unwrap();
+            let c = |s: &str| s.parse::<Card>().unwrap();
             let cfg = GameConfig {
                 board: ["2c", "7d", "9h", "Js"].map(c).to_vec(),
                 pot: Chips::whole(2),
@@ -2485,7 +2542,6 @@ mod tests {
                 let make = || {
                     Trainer::new(
                         build_tree(&cfg).unwrap(),
-                        cfg.board.clone(),
                         combos.clone(),
                         TrainerOptions {
                             algorithm,
@@ -2519,21 +2575,20 @@ mod tests {
     fn river_board() -> Vec<Card> {
         ["2h", "7c", "9d", "Jc", "4s"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect()
     }
 
     struct Scenario {
         tree: super::super::tree::Tree,
         trainer_combos: [Vec<Combo>; 2],
-        board: Vec<Card>,
         pot: f64,
         bet: f64,
     }
 
     fn build_scenario() -> Scenario {
         let board = river_board();
-        let dead = crate::card::set_from_cards(&board);
+        let dead = CardSet::from_cards(&board);
         // OOP: JJ (value, always beats IP's 99) + KQo (air, always loses to IP's 99).
         let oop_range = Range::parse("JJ,KQo").unwrap();
         // IP: 99 (bluffcatcher — beats KQo, loses to JJ).
@@ -2555,14 +2610,13 @@ mod tests {
         Scenario {
             tree,
             trainer_combos: [oop_combos, ip_combos],
-            board,
             pot,
             bet,
         }
     }
 
     fn is_jj(c1: Card, c2: Card) -> bool {
-        crate::card::rank(c1) == 9 && crate::card::rank(c2) == 9 // J = rank index 9
+        c1.rank() == 9 && c2.rank() == 9 // J = rank index 9
     }
 
     #[test]
@@ -2570,7 +2624,6 @@ mod tests {
         let scenario = build_scenario();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2617,7 +2670,6 @@ mod tests {
         let combos0 = scenario.trainer_combos[0].clone();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2703,14 +2755,13 @@ mod tests {
     fn turn_board() -> Vec<Card> {
         ["2c", "7d", "9h", "Js"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect()
     }
 
     struct MultiStreetScenario {
         tree: super::super::tree::Tree,
         trainer_combos: [Vec<Combo>; 2],
-        board: Vec<Card>,
         pot: f64,
         bet: f64,
     }
@@ -2722,7 +2773,7 @@ mod tests {
     /// them across trainers being compared, rather than calling
     /// `build_multi_street_scenario()` (which re-parses fresh) more than once.
     fn multi_street_scenario_combos() -> [Vec<Combo>; 2] {
-        let dead = crate::card::set_from_cards(&turn_board());
+        let dead = CardSet::from_cards(&turn_board());
         // OOP: JJ (value, always beats IP's 76o on any river) + 54o (air, always loses).
         let oop_combos = Range::parse("JJ,54o").unwrap().combos(dead);
         // IP: 76o (bluffcatcher — always beats 54o, always loses to JJ, on any river).
@@ -2752,14 +2803,13 @@ mod tests {
         MultiStreetScenario {
             tree,
             trainer_combos,
-            board,
             pot,
             bet,
         }
     }
 
     fn is_pocket_jacks(c1: Card, c2: Card) -> bool {
-        crate::card::rank(c1) == 9 && crate::card::rank(c2) == 9
+        c1.rank() == 9 && c2.rank() == 9
     }
 
     #[test]
@@ -2767,7 +2817,6 @@ mod tests {
         let scenario = build_multi_street_scenario();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2803,7 +2852,6 @@ mod tests {
         let combos0 = scenario.trainer_combos[0].clone();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2897,7 +2945,7 @@ mod tests {
         // isomorphism reduction at all).
         ["2c", "7d", "9c", "Jd"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect()
     }
 
@@ -2927,14 +2975,13 @@ mod tests {
         MultiStreetScenario {
             tree,
             trainer_combos,
-            board,
             pot,
             bet,
         }
     }
 
     fn two_suit_scenario_combos() -> [Vec<Combo>; 2] {
-        let dead = crate::card::set_from_cards(&two_suit_turn_board());
+        let dead = CardSet::from_cards(&two_suit_turn_board());
         let oop_combos = Range::parse("JJ,54o").unwrap().combos(dead);
         let ip_combos = Range::parse("76o").unwrap().combos(dead);
         [oop_combos, ip_combos]
@@ -2991,7 +3038,6 @@ mod tests {
         let iterations = 3_000;
         let mut reduced_trainer = Trainer::new(
             reduced.tree,
-            reduced.board,
             reduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3002,7 +3048,6 @@ mod tests {
         reduced_trainer.train(iterations);
         let mut unreduced_trainer = Trainer::new(
             unreduced.tree,
-            unreduced.board,
             unreduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3115,7 +3160,7 @@ mod tests {
     #[test]
     fn river_buckets_bijective_matches_unbucketed() {
         let board = river_board();
-        let dead = crate::card::set_from_cards(&board);
+        let dead = CardSet::from_cards(&board);
         let oop_combos = Range::parse("JJ,KQo").unwrap().combos(dead);
         let ip_combos = Range::parse("99").unwrap().combos(dead);
         let pot = 100.0;
@@ -3136,7 +3181,6 @@ mod tests {
         let iterations = 3_000;
         let mut trainer_none = Trainer::new(
             tree_none,
-            board.clone(),
             [oop_combos.clone(), ip_combos.clone()],
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3148,7 +3192,6 @@ mod tests {
         // 100 exceeds both players' combo counts here, so this is a bijection on both sides.
         let mut trainer_bucketed = Trainer::new(
             tree_bucketed,
-            board,
             [oop_combos, ip_combos],
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3198,7 +3241,7 @@ mod tests {
     #[test]
     fn river_buckets_reduced_stays_zero_sum_and_respects_hand_strength_order() {
         let board = river_board(); // 2h 7c 9d Jc 4s
-        let dead = crate::card::set_from_cards(&board);
+        let dead = CardSet::from_cards(&board);
         // OOP: JJ (trips jacks - top tier), QQ (overpair - middle tier),
         // KQo+72o (air, kicker-only - bottom tier).
         let oop_range = Range::parse("JJ,QQ,KQo,72o").unwrap();
@@ -3231,7 +3274,6 @@ mod tests {
         let combos0 = oop_combos.clone();
         let mut trainer = Trainer::new(
             tree,
-            board,
             [oop_combos, ip_combos],
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3249,8 +3291,8 @@ mod tests {
             "expected zero-sum root EV even under abstraction, got ev0={ev0}, ev1={ev1}"
         );
 
-        let is_jj = |c1: Card, c2: Card| crate::card::rank(c1) == 9 && crate::card::rank(c2) == 9;
-        let is_qq = |c1: Card, c2: Card| crate::card::rank(c1) == 10 && crate::card::rank(c2) == 10;
+        let is_jj = |c1: Card, c2: Card| c1.rank() == 9 && c2.rank() == 9;
+        let is_qq = |c1: Card, c2: Card| c1.rank() == 10 && c2.rank() == 10;
         let avg = |pred: &dyn Fn(Card, Card) -> bool, strategy: &[Vec<f64>]| -> f64 {
             let matching: Vec<f64> = combos0
                 .iter()
@@ -3307,9 +3349,9 @@ mod tests {
     #[test]
     fn avg_score_matches_naive_full_enumeration_average() {
         let board = two_suit_turn_board(); // 2c 7d 9c Jd -- h/s free
-        let dead = crate::card::set_from_cards(&board);
+        let dead = CardSet::from_cards(&board);
         let combos = Range::parse("JJ,54o").unwrap().combos(dead);
-        let used = crate::card::set_from_cards(&board);
+        let used = CardSet::from_cards(&board);
 
         let naive: Vec<f64> = combos
             .iter()
@@ -3319,14 +3361,14 @@ mod tests {
                  }| {
                     let mut sum = 0.0;
                     let mut count = 0.0;
-                    for c in 0..52u8 {
-                        if crate::card::set_contains(used, c) || c == h1 || c == h2 {
+                    for c in Card::all() {
+                        if used.contains(c) || c == h1 || c == h2 {
                             continue;
                         }
                         let mut river = board.clone();
                         river.push(c);
                         let score =
-                            evaluate_7([h1, h2, river[0], river[1], river[2], river[3], river[4]]);
+                            score_7([h1, h2, river[0], river[1], river[2], river[3], river[4]]);
                         sum += score as f64;
                         count += 1.0;
                     }
@@ -3357,18 +3399,17 @@ mod tests {
         // quickly even without bucketing, for the equivalence check below.
         ["2c", "7c", "9c"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect()
     }
 
     struct FlopScenario {
         tree: super::super::tree::Tree,
         trainer_combos: [Vec<Combo>; 2],
-        board: Vec<Card>,
     }
 
     fn flop_scenario_combos() -> [Vec<Combo>; 2] {
-        let dead = crate::card::set_from_cards(&flop_board());
+        let dead = CardSet::from_cards(&flop_board());
         let oop_combos = Range::parse("JJ,54o").unwrap().combos(dead);
         let ip_combos = Range::parse("76o").unwrap().combos(dead);
         [oop_combos, ip_combos]
@@ -3388,7 +3429,6 @@ mod tests {
         FlopScenario {
             tree,
             trainer_combos,
-            board,
         }
     }
 
@@ -3410,7 +3450,6 @@ mod tests {
         let iterations = 1_500;
         let mut trainer_none = Trainer::new(
             scenario_none.tree,
-            scenario_none.board,
             scenario_none.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3421,7 +3460,6 @@ mod tests {
         trainer_none.train(iterations);
         let mut trainer_bucketed = Trainer::new(
             scenario_bucketed.tree,
-            scenario_bucketed.board,
             scenario_bucketed.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3476,7 +3514,6 @@ mod tests {
         let iterations = 300;
         let mut trainer_none = Trainer::new(
             scenario_none.tree,
-            scenario_none.board,
             scenario_none.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3487,7 +3524,6 @@ mod tests {
         trainer_none.train(iterations);
         let mut trainer_bucketed = Trainer::new(
             scenario_bucketed.tree,
-            scenario_bucketed.board,
             scenario_bucketed.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3543,7 +3579,6 @@ mod tests {
 
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3561,7 +3596,7 @@ mod tests {
             "expected zero-sum root EV even under turn abstraction, got ev0={ev0}, ev1={ev1}"
         );
 
-        let is_jj = |c1: Card, c2: Card| crate::card::rank(c1) == 9 && crate::card::rank(c2) == 9;
+        let is_jj = |c1: Card, c2: Card| c1.rank() == 9 && c2.rank() == 9;
         let root_strategy = trainer.average_strategy(root_id);
         let bet_freq_jj: Vec<f64> = combos0
             .iter()
@@ -3638,7 +3673,6 @@ mod tests {
             let scenario = build_flop_scenario(combos);
             let mut trainer = Trainer::new(
                 scenario.tree,
-                scenario.board,
                 scenario.trainer_combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -3666,7 +3700,6 @@ mod tests {
         let scenario = build_scenario();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3675,7 +3708,7 @@ mod tests {
         )
         .unwrap();
         trainer.train(20_000);
-        let (_, [ev0, ev1]) = trainer.evaluate();
+        let [ev0, ev1] = trainer.evaluate().root_values;
         assert!(
             (ev0 + ev1).abs() < 1.0,
             "expected zero-sum root EV under the average strategy, got ev0={ev0}, ev1={ev1}"
@@ -3698,7 +3731,6 @@ mod tests {
         let combos0 = scenario.trainer_combos[0].clone();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3708,8 +3740,8 @@ mod tests {
         .unwrap();
         trainer.train(5_000);
 
-        let (eval, _) = trainer.evaluate();
-        let root_eval = eval.get(&root_id).expect("root should have an evaluation");
+        let eval = trainer.evaluate().nodes;
+        let root_eval = eval.get(root_id).expect("root should have an evaluation");
         let equity = root_eval
             .equity
             .as_ref()
@@ -3751,7 +3783,6 @@ mod tests {
         };
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3761,15 +3792,15 @@ mod tests {
         .unwrap();
         trainer.train(500);
 
-        let (eval, _) = trainer.evaluate();
-        let root_eval = eval.get(&root_id).expect("root should have an evaluation");
+        let eval = trainer.evaluate().nodes;
+        let root_eval = eval.get(root_id).expect("root should have an evaluation");
         assert!(
             root_eval.equity.is_none(),
             "expected no equity figure at a pre-river (incomplete board) node"
         );
         assert_eq!(
             root_eval.ev.len(),
-            trainer.combos(0).len(),
+            trainer.game.combos(Player::Oop).len(),
             "EV should still be reported per combo"
         );
     }
@@ -3803,7 +3834,6 @@ mod tests {
 
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3812,10 +3842,10 @@ mod tests {
         )
         .unwrap();
         trainer.train(20_000);
-        let (eval, _) = trainer.evaluate();
+        let eval = trainer.evaluate().nodes;
 
         let bound = pot + bet;
-        let root_eval = eval.get(&root_id).expect("root should have an evaluation");
+        let root_eval = eval.get(root_id).expect("root should have an evaluation");
         for &ev in &root_eval.ev {
             assert!(
                 ev.abs() <= bound + 1e-6,
@@ -3823,7 +3853,7 @@ mod tests {
             );
         }
         let ip_eval = eval
-            .get(&ip_facing_bet_id)
+            .get(ip_facing_bet_id)
             .expect("IP-facing-bet node should have an evaluation");
         for &ev in &ip_eval.ev {
             assert!(
@@ -3836,7 +3866,7 @@ mod tests {
         // converged average strategy its root EV should be close to
         // winning the pot every time it isn't check-through — strictly
         // positive, not just "in bounds".
-        let combos0 = trainer.combos(0);
+        let combos0 = trainer.game.combos(Player::Oop);
         for (
             i,
             &Combo {
@@ -3866,9 +3896,9 @@ mod tests {
     fn policy_snapshot_is_frozen_and_matches_trainer_reads() {
         let board: Vec<Card> = ["2c", "7c", "9d", "Jd"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect();
-        let dead = set_from_cards(&board);
+        let dead = CardSet::from_cards(&board);
         let combos = [
             Range::parse("AA:0.5,KK,QQ").unwrap().combos(dead),
             Range::parse("JJ,TT").unwrap().combos(dead),
@@ -3888,7 +3918,6 @@ mod tests {
         let make = || {
             Trainer::new(
                 build_tree(&cfg).unwrap(),
-                board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm: SolverAlgorithm::Dcfr,
@@ -3898,13 +3927,13 @@ mod tests {
             )
             .unwrap()
         };
-        let bits = |(nodes, root): (HashMap<usize, NodeEvaluation>, [f64; 2])| {
-            let mut nodes: Vec<_> = nodes
-                .into_iter()
-                .map(|(id, e)| (id, e.ev.iter().map(|v| v.to_bits()).collect::<Vec<_>>()))
+        let bits = |evaluation: Evaluation| {
+            let nodes: Vec<Vec<u64>> = evaluation
+                .nodes
+                .iter()
+                .map(|e| e.ev.iter().map(|v| v.to_bits()).collect())
                 .collect();
-            nodes.sort();
-            (nodes, root.map(f64::to_bits))
+            (nodes, evaluation.root_values.map(f64::to_bits))
         };
 
         let mut trainer = make();
@@ -3974,7 +4003,6 @@ mod tests {
         let few = build_scenario();
         let mut few_trainer = Trainer::new(
             few.tree,
-            few.board,
             few.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3988,7 +4016,6 @@ mod tests {
         let many = build_scenario();
         let mut many_trainer = Trainer::new(
             many.tree,
-            many.board,
             many.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4023,7 +4050,6 @@ mod tests {
         let pot = scenario.pot;
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4049,10 +4075,10 @@ mod tests {
         use crate::solver::tree::{Action, Player, Tree};
         let board: Vec<Card> = ["2c", "7d", "9h", "Js", "Qd"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect();
         let scores = eval_combos_if_complete(&combos, &board);
-        let dead = set_from_cards(&board);
+        let dead = mask_of(&board);
         // Assert the fixture's actual hand ordering, including every legal
         // pair; otherwise the analytical payoff argument would be invalid.
         for (
@@ -4069,7 +4095,7 @@ mod tests {
                 },
             ) in combos[1].iter().enumerate()
             {
-                if [h1, h2, v1, v2].iter().any(|&c| set_contains(dead, c))
+                if [h1, h2, v1, v2].iter().any(|&c| mask_has(dead, c))
                     || h1 == v1
                     || h1 == v2
                     || h2 == v1
@@ -4084,6 +4110,7 @@ mod tests {
             }
         }
         let tree = Tree {
+            board: board.clone(),
             root: Node::Decision {
                 id: 0,
                 player: Player::Oop,
@@ -4114,7 +4141,6 @@ mod tests {
         // and impossible deals, which the kernels must still ignore.
         Trainer::new_unchecked(
             tree,
-            board,
             combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4124,7 +4150,11 @@ mod tests {
     }
 
     fn weighted_combo(a: &str, b: &str, weight: f64) -> Combo {
-        Combo::new(card_from_str(a).unwrap(), card_from_str(b).unwrap(), weight)
+        Combo::new(
+            a.parse::<Card>().unwrap(),
+            b.parse::<Card>().unwrap(),
+            weight,
+        )
     }
 
     fn assert_analytical_exploitability(expl: Exploitability) {
@@ -4235,7 +4265,6 @@ mod tests {
         let iterations = 3_000;
         let mut reduced_trainer = Trainer::new(
             reduced.tree,
-            reduced.board,
             reduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4246,7 +4275,6 @@ mod tests {
         reduced_trainer.train(iterations);
         let mut unreduced_trainer = Trainer::new(
             unreduced.tree,
-            unreduced.board,
             unreduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4278,7 +4306,7 @@ mod tests {
 #[cfg(test)]
 mod terminal_regression_tests {
     use super::*;
-    use crate::card::card_from_str;
+    use crate::card::Card;
     use crate::solver::tree::{Player, Tree};
     use crate::solver::Chips;
 
@@ -4295,7 +4323,7 @@ mod terminal_regression_tests {
         // Entire deck includes initial-board conflicts, overlaps, equal-rank
         // groups, empty support and every valid two-card blocker pattern.
         let full: Vec<_> = (0..52)
-            .flat_map(|a| (a + 1..52).map(move |b| Combo::new(a, b, 1.0)))
+            .flat_map(|a| (a + 1..52).map(move |b| Combo::new(Card(a), Card(b), 1.0)))
             .collect();
         let mut asymmetric = full.iter().step_by(7).copied().collect::<Vec<_>>();
         asymmetric.reverse();
@@ -4309,13 +4337,14 @@ mod terminal_regression_tests {
             ["Tc", "Jc", "Qc", "Kc", "Ac"],
             ["Jh", "Js", "2c", "2d", "3h"],
         ] {
-            let board: Vec<_> = board.iter().map(|s| card_from_str(s).unwrap()).collect();
+            let board: Vec<_> = board.iter().map(|s| s.parse::<Card>().unwrap()).collect();
             for combos in [
                 [full.clone(), full.clone()],
                 [asymmetric.clone(), full.clone()],
                 [full.clone(), Vec::new()],
             ] {
                 let tree = Tree {
+                    board: board.clone(),
                     root: Node::Terminal(Terminal::Showdown {
                         invested: [37.0, 121.0],
                     }),
@@ -4325,7 +4354,6 @@ mod terminal_regression_tests {
                 // kernels' degenerate paths.
                 let trainer = Trainer::new_unchecked(
                     tree,
-                    board.clone(),
                     combos,
                     TrainerOptions {
                         algorithm: SolverAlgorithm::CfrPlus,
@@ -4334,7 +4362,7 @@ mod terminal_regression_tests {
                 );
                 for phase in 0..3 {
                     let reach: [Vec<f64>; 2] = std::array::from_fn(|p| {
-                        (0..trainer.combos[p].len())
+                        (0..trainer.game.combos[p].len())
                             .map(|i| {
                                 if phase == 2 || (i + phase) % 5 == 0 {
                                     0.0
@@ -4360,22 +4388,26 @@ mod terminal_regression_tests {
                             invested: [37.0, 121.0],
                         },
                     ] {
-                        let scores = eval_combos_if_complete(&trainer.combos, &board);
+                        let scores = eval_combos_if_complete(&trainer.game.combos, &board);
                         trainer
+                            .game
                             .use_pairwise_terminals
                             .store(false, std::sync::atomic::Ordering::Relaxed);
-                        let actual = trainer.terminal_value(&terminal, &reach, &board, &scores);
+                        let actual = trainer
+                            .game
+                            .terminal_value(&terminal, &reach, &board, &scores);
                         if let Terminal::Showdown { invested } = &terminal {
                             for p in 0..2 {
-                                let before = trainer.terminal_index.showdown_before_rank_cache(
-                                    &trainer.combos,
-                                    p,
-                                    &reach[1 - p],
-                                    &scores,
-                                    &trainer.board_order_cache[&board],
-                                    set_from_cards(&board),
-                                    invested,
-                                );
+                                let before =
+                                    trainer.game.terminal_index.showdown_before_rank_cache(
+                                        &trainer.game.combos,
+                                        p,
+                                        &reach[1 - p],
+                                        &scores,
+                                        &trainer.game.board_order_cache[&board],
+                                        mask_of(&board),
+                                        invested,
+                                    );
                                 assert_eq!(
                                     actual[p].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
                                     before.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
@@ -4383,9 +4415,12 @@ mod terminal_regression_tests {
                             }
                         }
                         trainer
+                            .game
                             .use_pairwise_terminals
                             .store(true, std::sync::atomic::Ordering::Relaxed);
-                        let reference = trainer.terminal_value(&terminal, &reach, &board, &scores);
+                        let reference = trainer
+                            .game
+                            .terminal_value(&terminal, &reach, &board, &scores);
                         for p in 0..2 {
                             for (a, b) in actual[p].iter().zip(&reference[p]) {
                                 close(*a, *b);
@@ -4405,9 +4440,9 @@ mod terminal_regression_tests {
             vec!["2c", "7d", "9h", "Js", "Qd"],
             vec!["Jh", "Js", "2c", "2d"],
         ] {
-            let board: Vec<_> = board.iter().map(|s| card_from_str(s).unwrap()).collect();
+            let board: Vec<_> = board.iter().map(|s| s.parse::<Card>().unwrap()).collect();
             let combos: [Vec<_>; 2] = ["AA,KK,JJ,54s:0.3", "QQ,TT,88,65s:0.7"].map(|s| {
-                let mut v = Range::parse(s).unwrap().combos(set_from_cards(&board));
+                let mut v = Range::parse(s).unwrap().combos(CardSet::from_cards(&board));
                 v.sort_by_key(|c| (c.cards[0], c.cards[1]));
                 v
             });
@@ -4421,7 +4456,6 @@ mod terminal_regression_tests {
             };
             let mut actual = Trainer::new(
                 build_tree(&cfg).unwrap(),
-                board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -4431,7 +4465,6 @@ mod terminal_regression_tests {
             .unwrap();
             let mut reference = Trainer::new(
                 build_tree(&cfg).unwrap(),
-                board,
                 combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -4440,6 +4473,7 @@ mod terminal_regression_tests {
             )
             .unwrap();
             reference
+                .game
                 .use_pairwise_terminals
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             let ev_a = actual.train(60);
@@ -4447,7 +4481,7 @@ mod terminal_regression_tests {
             for p in 0..2 {
                 close(ev_a[p], ev_b[p]);
             }
-            for id in 0..actual.tree.num_decision_nodes {
+            for id in 0..actual.game.tree.num_decision_nodes {
                 for (a, b) in actual
                     .average_strategy(id)
                     .iter()
@@ -4462,10 +4496,10 @@ mod terminal_regression_tests {
             close(a.oop, b.oop);
             close(a.ip, b.ip);
             close(a.total, b.total);
-            let (a, _) = actual.evaluate();
-            let (b, _) = reference.evaluate();
-            for (id, eval) in a {
-                for (x, y) in eval.ev.iter().zip(&b[&id].ev) {
+            let a = actual.evaluate().nodes;
+            let b = reference.evaluate().nodes;
+            for (eval, other) in a.iter().zip(&b) {
+                for (x, y) in eval.ev.iter().zip(&other.ev) {
                     close(*x, *y);
                 }
             }
@@ -4500,7 +4534,7 @@ fn suit_bucket_groups(
     maps: &[Vec<usize>; 2],
 ) -> [Vec<Vec<usize>>; 2] {
     let free: Vec<u8> = (0..4)
-        .filter(|s| !board.iter().any(|&c| suit(c) == *s))
+        .filter(|s| !board.iter().any(|&c| c.suit() == *s))
         .collect();
     std::array::from_fn(|p| {
         if free.len() < 2 {

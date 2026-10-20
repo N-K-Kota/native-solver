@@ -3,7 +3,7 @@
 //! manually during development. Run with:
 //!   cargo run --release --example flop_turn_bucket_speedup
 
-use native_solver::card::{card_from_str, set_from_cards};
+use native_solver::card::{Card, CardSet};
 use native_solver::range::Range;
 use native_solver::solver::Chips;
 use native_solver::solver::{build_tree, CardAbstraction, GameConfig, Trainer};
@@ -16,26 +16,20 @@ fn run(abstraction: CardAbstraction, iterations: u32) -> (std::time::Duration, [
     // tractable even for the unabstracted baseline.
     let board: Vec<_> = ["2c", "7c", "9c"]
         .iter()
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .collect();
-    let dead = set_from_cards(&board);
+    let dead = CardSet::from_cards(&board);
     let oop_combos = Range::parse("JJ,TT,99,AJs,KJs,AJo,KJo")
         .unwrap()
         .combos(dead);
     let ip_combos = Range::parse("88,77,ATs,KTs,ATo,KTo").unwrap().combos(dead);
 
-    let cfg = GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(200),
-        bet_sizes: vec![1.0],
-        max_raises: 0,
-        suit_isomorphism: true,
-    };
+    let cfg = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(200))
+        .with_bet_sizes([1.0])
+        .with_suit_isomorphism(true);
     let tree = build_tree(&cfg).unwrap();
     let mut trainer = Trainer::new(
         tree,
-        board,
         [oop_combos, ip_combos],
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,
@@ -73,7 +67,7 @@ fn main() {
         dur_none.as_secs_f64() / dur_ft.as_secs_f64()
     );
 
-    let dead = set_from_cards(&["2c", "7c", "9c"].map(|s| card_from_str(s).unwrap()));
+    let dead = CardSet::from_cards(&["2c", "7c", "9c"].map(|s| s.parse::<Card>().unwrap()));
     let oop_n = Range::parse("JJ,TT,99,AJs,KJs,AJo,KJo")
         .unwrap()
         .combos(dead)

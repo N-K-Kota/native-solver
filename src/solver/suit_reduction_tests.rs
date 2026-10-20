@@ -1,7 +1,7 @@
 //! Fixed-policy audit, independent of equality between two learning runs.
 //! The adapter is test-only: complete trees, symmetric ranges, no abstraction.
 use super::*;
-use crate::card::card_from_str;
+use crate::card::Card;
 use crate::range::Range;
 use crate::solver::Chips;
 use crate::solver::{build_tree_bounded, quality::ReferenceEvaluator, GameConfig};
@@ -37,7 +37,7 @@ fn expand(
         ) => {
             assert_eq!(player, rp);
             assert_eq!(format!("{actions:?}"), format!("{ra:?}"));
-            let combos = trainer.combos(player.index());
+            let combos = trainer.game.combos(*player);
             let policy = get(*rid);
             let indices: Vec<_> = combos
                 .iter()
@@ -46,7 +46,7 @@ fn expand(
                          cards: [a, b],
                          weight: w,
                      }| {
-                        let (x, y) = (map[a as usize], map[b as usize]);
+                        let (x, y) = (Card(map[a.0 as usize]), Card(map[b.0 as usize]));
                         let i = combos
                             .iter()
                             .position(|&Combo { cards: [c, d], .. }| {
@@ -78,12 +78,12 @@ fn expand(
             .iter()
             .map(|(cards, child)| {
                 assert_eq!(cards.len(), 1);
-                let card = map[cards[0] as usize];
+                let card = Card(map[cards[0].0 as usize]);
                 let (members, rep) = rc
                     .iter()
                     .find(|(members, _)| members.contains(&card))
                     .unwrap();
-                let (a, b) = (card % 4, members[0] % 4);
+                let (a, b) = (card.suit(), members[0].suit());
                 let composed =
                     usize::from(a != b && map.iter().enumerate().any(|(i, &c)| i != c as usize));
                 let mut next = map;
@@ -117,7 +117,7 @@ fn projected(
     let mut policies = Policies::new();
     let composed = expand(
         full,
-        trainer.tree(),
+        trainer.game.tree(),
         trainer,
         std::array::from_fn(|i| i as u8),
         &mut policies,
@@ -128,7 +128,7 @@ fn projected(
 
 fn config(board: &[&str]) -> GameConfig {
     GameConfig {
-        board: board.iter().map(|s| card_from_str(s).unwrap()).collect(),
+        board: board.iter().map(|s| s.parse::<Card>().unwrap()).collect(),
         pot: Chips::whole(100),
         effective_stack: Chips::whole(150),
         bet_sizes: vec![0.33, 0.75],
@@ -139,7 +139,9 @@ fn config(board: &[&str]) -> GameConfig {
 
 fn combos(cfg: &GameConfig, ranges: [&str; 2]) -> [Vec<Combo>; 2] {
     ranges.map(|s| {
-        let mut cs = Range::parse(s).unwrap().combos(set_from_cards(&cfg.board));
+        let mut cs = Range::parse(s)
+            .unwrap()
+            .combos(CardSet::from_cards(&cfg.board));
         for combo in &mut cs {
             combo.cards.sort_unstable();
         }
@@ -153,7 +155,6 @@ fn trainer(cfg: &GameConfig, cs: &[Vec<Combo>; 2], iso: bool) -> Trainer {
     cfg.suit_isomorphism = iso;
     Trainer::new(
         build_tree_bounded(&cfg, 100_000).unwrap(),
-        cfg.board,
         cs.clone(),
         TrainerOptions {
             algorithm: SolverAlgorithm::Dcfr,
@@ -172,7 +173,7 @@ fn audit(oracle: &ReferenceEvaluator<'_>, full: &Node, t: &Trainer, expected_com
     }
     let q = oracle.evaluate(|id| policy[&id].clone()).unwrap();
     let actual = t.exploitability();
-    let ev = t.evaluate().1.map(|v| v / q.joint_mass);
+    let ev = t.evaluate().root_values.map(|v| v / q.joint_mass);
     for (name, a, b) in [
         ("OOP EV", ev[0], q.profile_ev[0]),
         ("IP EV", ev[1], q.profile_ev[1]),
@@ -213,10 +214,10 @@ fn current(t: &Trainer, id: usize) -> Vec<Vec<f64>> {
 /// Diagnostics compare the same public history and concrete, board-live hand.
 /// Never require two independently learned profiles to be numerically equal.
 fn trace(full: &Trainer, reduced: &Trainer) {
-    let (regrets, _) = projected(full.tree(), reduced, |id| {
+    let (regrets, _) = projected(full.game.tree(), reduced, |id| {
         reduced.node_data[id].lock().unwrap().regret_sum.clone()
     });
-    let (strategy, _) = projected(full.tree(), reduced, |id| current(reduced, id));
+    let (strategy, _) = projected(full.game.tree(), reduced, |id| current(reduced, id));
     let mut max_regret: f64 = 0.0;
     let mut max_policy = (0.0, 0, 0);
     for (&id, rows) in &regrets {
@@ -228,10 +229,10 @@ fn trace(full: &Trainer, reduced: &Trainer) {
         }
         drop(own);
         let own = current(full, id);
-        let (player, board) = &full.node_meta[id];
+        let (player, board) = &full.game.node_meta[id];
         for (a, b) in own.iter().zip(&strategy[&id]) {
             for (i, (x, y)) in a.iter().zip(b).enumerate() {
-                let [h1, h2] = full.combos[*player][i].cards;
+                let [h1, h2] = full.game.combos[*player][i].cards;
                 if !board.contains(&h1) && !board.contains(&h2) && (x - y).abs() > max_policy.0 {
                     max_policy = ((x - y).abs(), id, i);
                 }
@@ -240,7 +241,7 @@ fn trace(full: &Trainer, reduced: &Trainer) {
     }
     let (gap, id, i) = max_policy;
     println!("trace iterations={} regret_gap={max_regret:.3e} current_gap={gap} node={id} hand={i} board={:?} full_regrets={:?} reduced_regrets={:?}",
-        full.iterations_completed(),full.node_board(id),full.node_data[id].lock().unwrap().regret_sum.iter().map(|r|r[i]).collect::<Vec<_>>(),regrets[&id].iter().map(|r|r[i]).collect::<Vec<_>>());
+        full.iterations_completed(),full.game.node_board(id),full.node_data[id].lock().unwrap().regret_sum.iter().map(|r|r[i]).collect::<Vec<_>>(),regrets[&id].iter().map(|r|r[i]).collect::<Vec<_>>());
     println!(
         "trajectory full={} reduced={}",
         full.exploitability().total,
@@ -386,11 +387,11 @@ fn matrix_flop_medium_fixed_profiles() {
 
 fn assert_policy_symmetry(t: &Trainer) {
     let mut compared = 0;
-    for (id, (player, board)) in t.node_meta.iter().enumerate() {
+    for (id, (player, board)) in t.game.node_meta.iter().enumerate() {
         let free: Vec<_> = (0..4)
-            .filter(|s| !board.iter().any(|&c| suit(c) == *s))
+            .filter(|s| !board.iter().any(|&c| c.suit() == *s))
             .collect();
-        let (_, buckets) = t.combo_buckets(*player, board);
+        let (_, buckets) = t.game.combo_buckets(*player, board);
         let current = current(t, id);
         let average = t.average_strategy(id);
         for &a in &free {
@@ -403,10 +404,10 @@ fn assert_policy_symmetry(t: &Trainer) {
                     &Combo {
                         cards: [h1, h2], ..
                     },
-                ) in t.combos[*player].iter().enumerate()
+                ) in t.game.combos[*player].iter().enumerate()
                 {
                     let mapped = normalize_pair(swap_suit(h1, a, b), swap_suit(h2, a, b));
-                    let j = t.combos[*player]
+                    let j = t.game.combos[*player]
                         .iter()
                         .position(|&Combo { cards: [c, d], .. }| normalize_pair(c, d) == mapped)
                         .unwrap();
@@ -423,7 +424,7 @@ fn assert_policy_symmetry(t: &Trainer) {
                 }
             }
         }
-        for i in 0..t.combos[*player].len() {
+        for i in 0..t.game.combos[*player].len() {
             assert!((average.iter().map(|r| r[i]).sum::<f64>() - 1.0).abs() < 1e-12);
             assert!((current.iter().map(|r| r[buckets[i]]).sum::<f64>() - 1.0).abs() < 1e-12);
         }
@@ -459,7 +460,6 @@ fn reduced_policies_are_exactly_symmetric_across_algorithms_and_buckets() {
                     ] {
                         let mut t = Trainer::new(
                             build_tree_bounded(&cfg, 100_000).unwrap(),
-                            cfg.board.clone(),
                             cs.clone(),
                             TrainerOptions {
                                 algorithm,
@@ -485,7 +485,6 @@ fn reduced_tree_rejects_asymmetric_initial_weights() {
     let new = |cfg: &GameConfig| {
         Trainer::new(
             build_tree_bounded(cfg, 100_000).unwrap(),
-            cfg.board.clone(),
             cs.clone(),
             TrainerOptions::default(),
         )

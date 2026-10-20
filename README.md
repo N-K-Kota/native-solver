@@ -12,66 +12,96 @@ A heads-up postflop No-Limit Hold'em solver in Rust. It includes:
 - per-node EV and river equity under the average strategy, and an exact
   exploitability (best-response) metric.
 
+## Installation
+
+```sh
+cargo add native-solver
+```
+
+Or add `native-solver = "0.1"` under `[dependencies]` in `Cargo.toml`.
+
 ## Example
 
-Solve a river spot, measure how far the result is from equilibrium, and read
-the first player's strategy:
+Solve a river spot, measure how far the result is from equilibrium, and print
+the first player's strategy for each combo:
 
 ```rust
 use native_solver::{
-    build_tree, card_from_str, set_from_cards, Chips, GameConfig, Range, Trainer, TrainerOptions,
+    build_tree, Action, Card, CardSet, Chips, GameConfig, Node, Player, Range, Trainer,
+    TrainerOptions,
 };
 
-let board: Vec<_> = ["Ks", "Th", "7s", "4d", "2s"]
-    .iter()
-    .map(|card| card_from_str(card))
-    .collect::<Result<_, _>>()?;
-let config = GameConfig {
-    board: board.clone(),
-    pot: Chips::whole(100),
-    effective_stack: Chips::whole(100),
-    bet_sizes: vec![0.5, 1.0],
-    max_raises: 1,
-    suit_isomorphism: false,
-};
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let board = ["Ks", "Th", "7s", "4d", "2s"]
+        .iter()
+        .map(|card| card.parse())
+        .collect::<Result<Vec<Card>, _>>()?;
+    let config = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(100))
+        .with_bet_sizes([0.5, 1.0])
+        .with_max_raises(1);
 
-// Combos that share a card with the board are removed.
-let dead = set_from_cards(&board);
-let oop = Range::parse("AA,KK,KQs,QJs,JTs:0.5,AQo")?.combos(dead);
-let ip = Range::parse("AKs,AKo,KJs,TT,99,A5s:0.5")?.combos(dead);
+    // Two different ranks need an `s` (suited) or `o` (offsuit) marker.
+    // Passing the board as dead cards removes combos that share a card with it.
+    let dead = CardSet::from_cards(&board);
+    let oop = "AA,KK,KQs,QJs,JTs:0.5,AQo".parse::<Range>()?.combos(dead);
+    let ip = "AKs,AKo,KJs,TT,99,A5s:0.5".parse::<Range>()?.combos(dead);
 
-// Both steps validate their input and return an error instead of panicking.
-let tree = build_tree(&config)?;
-let mut trainer = Trainer::new(tree, board, [oop, ip], TrainerOptions::default())?;
-trainer.train(1000);
+    // Both steps validate their input and return an error instead of panicking.
+    let tree = build_tree(&config)?;
+    let mut trainer = Trainer::new(tree, [oop, ip], TrainerOptions::default())?;
+    trainer.train(1000);
 
-// Average gain, in chips, that a best response could still win.
-let exploitability = trainer.exploitability().total;
-assert!(exploitability < 1.0, "{exploitability}");
+    // Average gain, in chips, that a best response could still win.
+    println!("exploitability: {:.3} chips", trainer.exploitability().total);
 
-// The root is OOP's first decision. Rows are actions, columns are OOP's combos.
-let strategy = trainer.average_strategy(0);
-for row in &strategy {
-    assert_eq!(row.len(), trainer.game().combos(0).len());
+    // The root is OOP's first decision. Strategy rows follow the root's actions;
+    // columns follow OOP's combos.
+    let Node::Decision { actions, .. } = trainer.game().tree() else {
+        unreachable!("a river tree with chips behind starts with a decision");
+    };
+    let strategy = trainer.average_strategy(0);
+    for (i, combo) in trainer.game().combos(Player::Oop).iter().enumerate() {
+        let [a, b] = combo.cards;
+        print!("{a}{b}");
+        for (action, row) in actions.iter().zip(&strategy) {
+            let label = match action {
+                Action::Check => "check".to_string(),
+                Action::Bet(amount) => format!("bet {amount}"),
+                other => format!("{other:?}"),
+            };
+            print!("  {label} {:.0}%", row[i] * 100.0);
+        }
+        println!();
+    }
+    Ok(())
 }
-for combo in 0..strategy[0].len() {
-    let total: f64 = strategy.iter().map(|row| row[combo]).sum();
-    assert!((total - 1.0).abs() < 1e-9);
-}
-# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The output starts like this:
+
+```text
+exploitability: 0.060 chips
+JcTc  check 100%  bet 50 0%  bet 100 0%
+JdTd  check 100%  bet 50 0%  bet 100 0%
+JsTs  check 0%  bet 50 0%  bet 100 100%
+...
 ```
 
 Training more iterations lowers exploitability; the iteration count by itself
 says nothing about convergence. Check `exploitability()` instead.
 
+Training runs in parallel on Rayon's global thread pool. The thread count
+does not change the results; see [docs/algorithms.md](docs/algorithms.md).
+
 ## Errors
 
 `build_tree` returns a `TreeError` for an illegal board, a non-positive pot,
 a negative stack, or a bet size that is not a positive finite number.
-`Trainer::new` returns a `TrainerError` when the tree does not continue from
-the initial board, or when a range is empty, contains invalid, repeated, or
-board-blocked combos, or cannot be dealt against the other range. Pass the
-board as dead cards to `Range::combos` to remove blocked combos.
+`Trainer::new` returns a `TrainerError` for inputs it cannot solve, for
+example when the tree does not continue from the initial board, or when a
+range is empty, contains invalid, repeated, or board-blocked combos, or
+cannot be dealt against the other range. Pass the board as dead cards to
+`Range::combos` to remove blocked combos.
 
 ## Conventions
 
@@ -90,6 +120,12 @@ normalization, and the requirements of suit-isomorphism reduction, and
 - Memory grows with tree size × combo count. Use `build_tree_bounded` for
   untrusted input.
 
+## Benchmarks
+
+`examples/` holds benchmark programs that use only the public API. For
+example, `cargo run --release --example solver_performance -- --help` lists
+the workloads of the end-to-end solver benchmark.
+
 ## Stability
 
 The API may change in any `0.x` minor release. Breaking changes are listed
@@ -97,8 +133,23 @@ in [CHANGELOG.md](CHANGELOG.md).
 
 ## Minimum supported Rust version
 
-Rust 1.80 for the library. The test suite needs a newer stable compiler.
+Rust 1.80 for the library. The tests and benchmarks need Rust 1.85 or newer,
+because a dev-dependency (Criterion) requires it.
 
 ## License
 
-[MIT](LICENSE)
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.

@@ -1,10 +1,10 @@
 use native_solver::solver::Chips;
 use native_solver::solver::{build_tree, GameConfig, Trainer};
 use native_solver::solver::{SolverAlgorithm, TrainerOptions};
-use native_solver::{card_from_str, evaluate_7, set_contains, set_from_cards, Card, Combo};
+use native_solver::{evaluate_7, Card, CardSet, Combo};
 
 fn card(s: &str) -> Card {
-    card_from_str(s).unwrap()
+    s.parse::<Card>().unwrap()
 }
 
 fn check_forced_showdown(board_text: &[&str]) {
@@ -18,8 +18,8 @@ fn check_forced_showdown(board_text: &[&str]) {
         villain.cards[0],
         villain.cards[1],
     ]);
-    let dead = set_from_cards(&dead);
-    let remaining: Vec<Card> = (0..52).filter(|&c| !set_contains(dead, c)).collect();
+    let dead = CardSet::from_cards(&dead);
+    let remaining: Vec<Card> = Card::all().filter(|&c| !dead.contains(c)).collect();
     let mut runouts = 0;
     let mut check = |river_board: &[Card]| {
         assert_eq!(river_board.len(), 5);
@@ -62,17 +62,9 @@ fn check_forced_showdown(board_text: &[&str]) {
             }
         }
     }
-    let cfg = GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(0),
-        bet_sizes: vec![],
-        max_raises: 0,
-        suit_isomorphism: false,
-    };
+    let cfg = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(0));
     let mut trainer = Trainer::new(
         build_tree(&cfg).unwrap(),
-        board,
         [vec![hero], vec![villain]],
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,
@@ -81,7 +73,8 @@ fn check_forced_showdown(board_text: &[&str]) {
     )
     .unwrap();
     let trained = trainer.train(1);
-    let (nodes, evaluated) = trainer.evaluate();
+    let evaluation = trainer.evaluate();
+    let (nodes, evaluated) = (evaluation.nodes, evaluation.root_values);
     let exploitability = trainer.exploitability();
     println!("board={board_text:?}, legal ordered runouts={runouts}, train={trained:?}, evaluate={evaluated:?}, best_response={exploitability:?}");
     assert!(

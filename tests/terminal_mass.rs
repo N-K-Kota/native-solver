@@ -1,16 +1,20 @@
 //! Public-API regressions for blocker subtraction near zero compatible reach.
 use native_solver::solver::{Action, Node, Player, Terminal, Trainer, TrainerError, Tree};
 use native_solver::solver::{SolverAlgorithm, TrainerOptions};
-use native_solver::{card_from_str, evaluate_7, Combo};
+use native_solver::{evaluate_7, Card, Combo};
 
 fn combo(a: &str, b: &str, weight: f64) -> Combo {
-    Combo::new(card_from_str(a).unwrap(), card_from_str(b).unwrap(), weight)
+    Combo::new(
+        a.parse::<Card>().unwrap(),
+        b.parse::<Card>().unwrap(),
+        weight,
+    )
 }
 
 fn trainer(compatible_weight: Option<f64>, fold: bool) -> Result<Trainer, TrainerError> {
     let board: Vec<_> = ["2c", "7d", "9h", "Js", "Qd"]
         .iter()
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .collect();
     let hero = combo("Ac", "Ad", 1.0);
     let mut opponents = vec![
@@ -39,6 +43,7 @@ fn trainer(compatible_weight: Option<f64>, fold: bool) -> Result<Trainer, Traine
         }
     };
     let tree = Tree {
+        board: board.clone(),
         root: Node::Decision {
             id: 0,
             player: Player::Oop,
@@ -49,7 +54,6 @@ fn trainer(compatible_weight: Option<f64>, fold: bool) -> Result<Trainer, Traine
     };
     Trainer::new(
         tree,
-        board,
         [vec![hero], opponents],
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,
@@ -83,13 +87,13 @@ fn tiny_compatible_reach_survives_larger_blocked_reach() {
                 raw[0]
             );
             assert!((raw[1] + expected).abs() <= expected * 1e-10);
-            let (nodes, _) = trainer.evaluate();
+            let nodes = trainer.evaluate().nodes;
             assert!(
-                (nodes[&0].ev[0] - 50.0).abs() < 1e-8,
+                (nodes[0].ev[0] - 50.0).abs() < 1e-8,
                 "weight={weight}, ev={:?}",
-                nodes[&0].ev
+                nodes[0].ev
             );
-            assert!((nodes[&0].equity.as_ref().unwrap()[0] - 1.0).abs() < 1e-10);
+            assert!((nodes[0].equity.as_ref().unwrap()[0] - 1.0).abs() < 1e-10);
             let exploitability = trainer.exploitability();
             assert!(
                 (exploitability.oop - 50.0).abs() < 1e-8,
@@ -111,7 +115,7 @@ fn tiny_compatible_reach_survives_larger_blocked_reach() {
 fn highly_unequal_showdown_investments_preserve_small_payouts() {
     let board: Vec<_> = ["2c", "7d", "9h", "Js", "Qd"]
         .iter()
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .collect();
     let aces = combo("Ac", "Ad", 1.0);
     let kings = combo("Kh", "Kd", 1.0);
@@ -129,12 +133,12 @@ fn highly_unequal_showdown_investments_preserve_small_payouts() {
                 [vec![kings], vec![aces]]
             };
             let tree = Tree {
+                board: board.clone(),
                 root: Node::Terminal(Terminal::Showdown { invested }),
                 num_decision_nodes: 0,
             };
             let mut trainer = Trainer::new(
                 tree,
-                board.clone(),
                 combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -149,7 +153,7 @@ fn highly_unequal_showdown_investments_preserve_small_payouts() {
                 [-won, won]
             };
             let raw = trainer.train(1);
-            let (_, evaluated) = trainer.evaluate();
+            let evaluated = trainer.evaluate().root_values;
             let exploitability = trainer.exploitability();
             for (label, actual) in [
                 ("train", raw),

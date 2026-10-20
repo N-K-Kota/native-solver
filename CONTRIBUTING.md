@@ -34,3 +34,10 @@ hand evaluator must pass the exhaustive comparison over all 2,598,960 hands:
 ```sh
 cargo test --release evaluate_5_matches_reference_for_every_possible_hand
 ```
+
+## License
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed under the MIT and Apache-2.0 licenses, as
+described in the README, without any additional terms or conditions.

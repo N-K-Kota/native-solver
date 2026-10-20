@@ -7,11 +7,11 @@ use native_solver::solver::{
     build_tree, Action, CardAbstraction, GameConfig, Node, Player, SolverAlgorithm, Terminal,
     Trainer, TrainerError, Tree, UpdateSchedule,
 };
-use native_solver::{card_from_str, evaluate_7, set_from_cards, Card, Combo};
+use native_solver::{evaluate_7, Card, CardSet, Combo, HandStrength};
 use std::collections::HashMap;
 
 fn card(s: &str) -> Card {
-    card_from_str(s).unwrap()
+    s.parse::<Card>().unwrap()
 }
 fn board(names: &[&str]) -> Vec<Card> {
     names.iter().map(|s| card(s)).collect()
@@ -21,7 +21,7 @@ fn combo(a: &str, b: &str, w: f64) -> Combo {
 }
 /// Drops combos that share a card with `board`, as `Range::combos` does.
 fn live(combos: &[Vec<Combo>; 2], board: &[Card]) -> [Vec<Combo>; 2] {
-    let dead = set_from_cards(board);
+    let dead = CardSet::from_cards(board);
     combos.clone().map(|range| {
         range
             .into_iter()
@@ -39,13 +39,14 @@ fn near(actual: f64, expected: f64) {
     );
 }
 
-fn score(hand: Combo, b: &[Card]) -> u32 {
+fn score(hand: Combo, b: &[Card]) -> HandStrength {
     evaluate_7([hand.cards[0], hand.cards[1], b[0], b[1], b[2], b[3], b[4]])
 }
 
 // OOP may check directly to showdown or bet. IP then calls or folds.
 fn one_bet_tree(bet: f64) -> Tree {
     Tree {
+        board: river(),
         root: Node::Decision {
             id: 0,
             player: Player::Oop,
@@ -106,16 +107,16 @@ fn uniform(node: &Node, sizes: [usize; 2]) -> HashMap<usize, Vec<Vec<f64>>> {
 
 fn compare_trainer(trainer: &Trainer, initial_board: &[Card]) -> StrategyQuality {
     let evaluator = ReferenceEvaluator::new(
-        trainer.tree(),
+        trainer.game().tree(),
         initial_board,
-        [trainer.combos(0), trainer.combos(1)],
+        Player::ALL.map(|player| trainer.game().combos(player)),
     )
     .unwrap();
     let reference = evaluator
         .evaluate(|id| trainer.average_strategy(id))
         .unwrap();
     let production = trainer.exploitability();
-    let (_, raw_ev) = trainer.evaluate();
+    let raw_ev = trainer.evaluate().root_values;
     near(reference.profile_ev[0], raw_ev[0] / reference.joint_mass);
     near(reference.profile_ev[1], raw_ev[1] / reference.joint_mass);
     near(reference.best_response_ev[0], production.oop);
@@ -161,7 +162,6 @@ fn weighted_blocked_deals_have_hand_calculated_nonzero_exploitability() {
         let new = |combos| {
             Trainer::new(
                 one_bet_tree(5.0),
-                b.clone(),
                 combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -295,14 +295,9 @@ fn production_quality_matches_reference_before_and_after_training_all_algorithms
             combo("9c", "9d", 0.4),
         ],
     ];
-    let cfg = GameConfig {
-        board: b.clone(),
-        pot: Chips::whole(10),
-        effective_stack: Chips::whole(20),
-        bet_sizes: vec![0.5, 1.0],
-        max_raises: 1,
-        suit_isomorphism: false,
-    };
+    let cfg = GameConfig::new(b.clone(), Chips::whole(10), Chips::whole(20))
+        .with_bet_sizes([0.5, 1.0])
+        .with_max_raises(1);
     for (algorithm, schedule) in [
         SolverAlgorithm::Cfr,
         SolverAlgorithm::CfrPlus,
@@ -313,7 +308,6 @@ fn production_quality_matches_reference_before_and_after_training_all_algorithms
     {
         let mut trainer = Trainer::new(
             build_tree(&cfg).unwrap(),
-            b.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm,
@@ -342,7 +336,7 @@ fn direct_showdown_ev(initial: &[Card], combos: &[Vec<Combo>; 2], invested: [f64
             if unique.len() != dead.len() {
                 continue;
             }
-            let remaining: Vec<Card> = (0..52).filter(|c| !dead.contains(c)).collect();
+            let remaining: Vec<Card> = Card::all().filter(|c| !dead.contains(c)).collect();
             let mut payoff = 0.0;
             let mut count = 0;
             let mut record = |completed: &[Card]| {
@@ -395,18 +389,10 @@ fn turn_and_flop_all_in_match_direct_pair_runout_enumeration() {
                 combo("4d", "5h", 9.0),
             ],
         ];
-        let cfg = GameConfig {
-            board: initial.clone(),
-            pot: Chips::whole(100),
-            effective_stack: Chips::whole(0),
-            bet_sizes: vec![],
-            max_raises: 0,
-            suit_isomorphism: false,
-        };
+        let cfg = GameConfig::new(initial.clone(), Chips::whole(100), Chips::whole(0));
         let combos = live(&combos, &initial);
         let trainer = Trainer::new(
             build_tree(&cfg).unwrap(),
-            initial.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -429,14 +415,7 @@ fn turn_betting_with_private_blockers_matches_all_algorithm_profiles() {
         vec![combo("As", "Ks", 0.3), combo("Th", "Td", 0.8)],
         vec![combo("Qh", "Qd", 0.6), combo("As", "Jc", 0.4)],
     ];
-    let cfg = GameConfig {
-        board: b.clone(),
-        pot: Chips::whole(10),
-        effective_stack: Chips::whole(5),
-        bet_sizes: vec![0.5],
-        max_raises: 0,
-        suit_isomorphism: false,
-    };
+    let cfg = GameConfig::new(b.clone(), Chips::whole(10), Chips::whole(5)).with_bet_sizes([0.5]);
     for (algorithm, schedule) in [
         SolverAlgorithm::Cfr,
         SolverAlgorithm::CfrPlus,
@@ -447,7 +426,6 @@ fn turn_betting_with_private_blockers_matches_all_algorithm_profiles() {
     {
         let mut trainer = Trainer::new(
             build_tree(&cfg).unwrap(),
-            b.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm,
@@ -472,7 +450,6 @@ fn expanded_bucket_policy_is_evaluated_against_unrestricted_combo_responses() {
     ];
     let mut trainer = Trainer::new(
         one_bet_tree(10.0),
-        b.clone(),
         combos,
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,
@@ -521,10 +498,9 @@ fn malformed_boards_ranges_and_impossible_deals_are_errors() {
     let ranges = [vec![combo("Ac", "Ad", 1.0)], vec![combo("Kc", "Kd", 1.0)]];
     for invalid in [
         vec![],
-        vec![0, 1],
-        vec![0, 1, 2, 3, 4, 5],
-        vec![0, 0, 2],
-        vec![0, 1, 52],
+        board(&["2c", "2d"]),
+        board(&["2c", "2d", "2h", "2s", "3c", "3d"]),
+        board(&["2c", "2c", "2h"]),
     ] {
         assert!(matches!(
             ReferenceEvaluator::new(&root, &invalid, [&ranges[0], &ranges[1]]),
@@ -532,12 +508,11 @@ fn malformed_boards_ranges_and_impossible_deals_are_errors() {
         ));
     }
     for bad in [
-        vec![Combo::new(0, 0, 1.0)],
-        vec![Combo::new(0, 52, 1.0)],
-        vec![Combo::new(0, 1, -1.0)],
-        vec![Combo::new(0, 1, f64::NAN)],
-        vec![Combo::new(0, 1, f64::INFINITY)],
-        vec![Combo::new(0, 1, 1.0), Combo::new(1, 0, 0.3)],
+        vec![combo("2c", "2c", 1.0)],
+        vec![combo("2c", "2d", -1.0)],
+        vec![combo("2c", "2d", f64::NAN)],
+        vec![combo("2c", "2d", f64::INFINITY)],
+        vec![combo("2c", "2d", 1.0), combo("2d", "2c", 0.3)],
     ] {
         assert!(matches!(
             ReferenceEvaluator::new(&root, &b, [&bad, &ranges[1]]),
@@ -562,14 +537,8 @@ fn malformed_boards_ranges_and_impossible_deals_are_errors() {
 fn malformed_and_reduced_trees_are_rejected_instead_of_silently_misread() {
     let b = board(&["2c", "7c", "9c", "Jc"]);
     let ranges = [vec![combo("Ac", "Ad", 1.0)], vec![combo("Kc", "Kd", 1.0)]];
-    let cfg = GameConfig {
-        board: b.clone(),
-        pot: Chips::whole(10),
-        effective_stack: Chips::whole(0),
-        bet_sizes: vec![],
-        max_raises: 0,
-        suit_isomorphism: true,
-    };
+    let cfg =
+        GameConfig::new(b.clone(), Chips::whole(10), Chips::whole(0)).with_suit_isomorphism(true);
     let reduced = build_tree(&cfg).unwrap();
     assert!(matches!(
         ReferenceEvaluator::new(&reduced.root, &b, [&ranges[0], &ranges[1]]),
@@ -580,7 +549,7 @@ fn malformed_and_reduced_trees_are_rejected_instead_of_silently_misread() {
         invested: [5.0, 5.0],
     });
     let full_chance = || Node::Chance {
-        children: (0..52)
+        children: Card::all()
             .filter(|c| !b.contains(c))
             .map(|c| (vec![c], terminal.clone()))
             .collect(),
@@ -698,7 +667,7 @@ fn public_river_changes_hidden_range_before_best_response_choice() {
     // eliminate only one OOP hand, so treating the posterior as the initial
     // 70/30 mixture would select the wrong response on some public histories.
     let root = Node::Chance {
-        children: (0..52)
+        children: Card::all()
             .filter(|c| !initial.contains(c))
             .enumerate()
             .map(|(id, c)| {
@@ -733,7 +702,7 @@ fn public_river_changes_hidden_range_before_best_response_choice() {
     let mut choose_call = 0;
     let mut choose_fold = 0;
     for river in
-        (0..52).filter(|c| !initial.contains(c) && *c != hero.cards[0] && *c != hero.cards[1])
+        Card::all().filter(|c| !initial.contains(c) && *c != hero.cards[0] && *c != hero.cards[1])
     {
         let mut completed = initial.clone();
         completed.push(river);

@@ -1,7 +1,7 @@
-//! Hand evaluation. `evaluate_5` scores an exact 5-card hand; `evaluate_7`
+//! Hand evaluation. [`evaluate_5`] scores an exact 5-card hand; [`evaluate_7`]
 //! scores the best 5-card hand out of 7 cards (hole cards + board).
 //!
-//! `evaluate_5` is table-driven for speed, since CFR calls it an enormous
+//! [`evaluate_5`] is table-driven for speed, since CFR calls it an enormous
 //! number of times. Every 5-card hand falls into one of two cases:
 //!
 //! - **All 5 ranks distinct**: straight/flush/high-card only (a repeated
@@ -21,11 +21,11 @@
 //! original correctness-first implementation (grouping + sorting, checked
 //! all 21 5-card subsets' worth of hand types by hand in earlier
 //! milestones) — kept around purely as the oracle for table generation and
-//! for the exhaustive cross-check test below. `evaluate_5` and
+//! for the exhaustive cross-check test below. [`evaluate_5`] and
 //! `evaluate_5_reference` are checked equal across all C(52,5) = 2,598,960
 //! possible 5-card hands, not just a handful of examples.
 
-use crate::card::{rank, suit, Card};
+use crate::card::Card;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -40,7 +40,7 @@ const CAT_FOUR_KIND: u32 = 7;
 const CAT_STRAIGHT_FLUSH: u32 = 8;
 
 /// Hand categories, ordered from weakest to strongest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HandCategory {
     /// No pair or better.
     HighCard,
@@ -62,8 +62,34 @@ pub enum HandCategory {
     StraightFlush,
 }
 
-/// Extract the hand category from a score returned by `evaluate_5`/`evaluate_7`.
-pub fn category_of(score: u32) -> HandCategory {
+/// The strength of a five-card poker hand, as returned by [`evaluate_5`] and
+/// [`evaluate_7`]. Stronger hands compare greater; equal strengths split the
+/// pot.
+///
+/// ```
+/// use native_solver::{evaluate_5, Card, HandCategory};
+///
+/// let hand = |s: &str| -> [Card; 5] {
+///     let cards: Vec<Card> = s.split(' ').map(|c| c.parse().unwrap()).collect();
+///     cards.try_into().unwrap()
+/// };
+/// let flush = evaluate_5(hand("Ah 9h 7h 4h 2h"));
+/// let straight = evaluate_5(hand("9h 8d 7s 6h 5c"));
+/// assert!(flush > straight);
+/// assert_eq!(flush.category(), HandCategory::Flush);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HandStrength(pub(crate) u32);
+
+impl HandStrength {
+    /// The hand's category, e.g. [`HandCategory::Flush`].
+    pub fn category(self) -> HandCategory {
+        category_of(self.0)
+    }
+}
+
+/// The category packed into the top bits of an internal score.
+fn category_of(score: u32) -> HandCategory {
     match score >> 20 {
         CAT_HIGH_CARD => HandCategory::HighCard,
         CAT_PAIR => HandCategory::Pair,
@@ -112,7 +138,7 @@ fn straight_high(ranks_desc: &[u8]) -> Option<u8> {
     Some(ranks_desc[0])
 }
 
-/// Original correctness-first `evaluate_5`: groups ranks by count and sorts,
+/// Original correctness-first [`evaluate_5`]: groups ranks by count and sorts,
 /// checking every case explicitly. Kept (and `pub`, for `benches/`) as the
 /// oracle table generation and the exhaustive test below cross-check the
 /// fast path against — not used on the hot path, not the function to call.
@@ -122,8 +148,8 @@ pub fn evaluate_5_reference(cards: [Card; 5]) -> u32 {
     let mut rank_counts = [0u8; 13];
     let mut suit_counts = [0u8; 4];
     for &c in &cards {
-        rank_counts[rank(c) as usize] += 1;
-        suit_counts[suit(c) as usize] += 1;
+        rank_counts[c.rank() as usize] += 1;
+        suit_counts[c.suit() as usize] += 1;
     }
     let is_flush = suit_counts.contains(&5);
 
@@ -251,25 +277,37 @@ fn rank_multisets_with_repeat() -> Vec<[u8; 5]> {
 /// repeats at most 4 times).
 fn representative_hand(ranks: &[u8; 5]) -> [Card; 5] {
     let mut next_suit = [0u8; 13];
-    let mut cards = [0u8; 5];
+    let mut cards = [Card(0); 5];
     for (i, &r) in ranks.iter().enumerate() {
         let s = next_suit[r as usize];
         next_suit[r as usize] += 1;
-        cards[i] = r * 4 + s;
+        cards[i] = Card(r * 4 + s);
     }
     cards
 }
 
-/// Score an exact 5-card hand. Higher is better.
-pub fn evaluate_5(cards: [Card; 5]) -> u32 {
+/// The strength of an exact five-card hand.
+///
+/// The five cards must be distinct; repeated cards give a meaningless
+/// result and may panic.
+pub fn evaluate_5(cards: [Card; 5]) -> HandStrength {
+    HandStrength(score_5(cards))
+}
+
+/// [`evaluate_5`] as a raw score, for the solver's hot paths.
+pub(crate) fn score_5(cards: [Card; 5]) -> u32 {
+    debug_assert!(
+        crate::card::CardSet::from_cards(&cards).len() == 5,
+        "evaluate_5 needs five distinct cards"
+    );
     let t = tables();
 
     let mut suit_counts = [0u8; 4];
     let mut rank_mask: u16 = 0;
     let mut has_repeat = false;
     for &c in &cards {
-        let r = rank(c);
-        suit_counts[suit(c) as usize] += 1;
+        let r = c.rank();
+        suit_counts[c.suit() as usize] += 1;
         let bit = 1u16 << r;
         if rank_mask & bit != 0 {
             has_repeat = true;
@@ -293,7 +331,7 @@ pub fn evaluate_5(cards: [Card; 5]) -> u32 {
 
     let product: u64 = cards
         .iter()
-        .map(|&c| RANK_PRIMES[rank(c) as usize])
+        .map(|&c| RANK_PRIMES[c.rank() as usize])
         .product();
     *t.paired
         .get(&product)
@@ -325,8 +363,17 @@ const COMBOS_7_CHOOSE_5: [[usize; 5]; 21] = [
     [2, 3, 4, 5, 6],
 ];
 
-/// Score the best 5-card hand out of 7 cards (e.g. 2 hole cards + 5 board cards).
-pub fn evaluate_7(cards: [Card; 7]) -> u32 {
+/// The strength of the best five-card hand out of seven cards, e.g. two hole
+/// cards and a five-card board.
+///
+/// The seven cards must be distinct; repeated cards give a meaningless
+/// result and may panic.
+pub fn evaluate_7(cards: [Card; 7]) -> HandStrength {
+    HandStrength(score_7(cards))
+}
+
+/// [`evaluate_7`] as a raw score, for the solver's hot paths.
+pub(crate) fn score_7(cards: [Card; 7]) -> u32 {
     COMBOS_7_CHOOSE_5
         .iter()
         .map(|combo| {
@@ -337,7 +384,7 @@ pub fn evaluate_7(cards: [Card; 7]) -> u32 {
                 cards[combo[3]],
                 cards[combo[4]],
             ];
-            evaluate_5(five)
+            score_5(five)
         })
         .max()
         .expect("21 combos is never empty")
@@ -346,12 +393,12 @@ pub fn evaluate_7(cards: [Card; 7]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::card_from_str;
+    use crate::card::Card;
 
     fn hand5(cards: &str) -> [Card; 5] {
         let parsed: Vec<Card> = cards
             .split_whitespace()
-            .map(|c| card_from_str(c).unwrap())
+            .map(|c| c.parse::<Card>().unwrap())
             .collect();
         parsed.try_into().unwrap()
     }
@@ -359,7 +406,7 @@ mod tests {
     fn hand7(cards: &str) -> [Card; 7] {
         let parsed: Vec<Card> = cards
             .split_whitespace()
-            .map(|c| card_from_str(c).unwrap())
+            .map(|c| c.parse::<Card>().unwrap())
             .collect();
         parsed.try_into().unwrap()
     }
@@ -367,43 +414,43 @@ mod tests {
     #[test]
     fn categorizes_each_hand_type() {
         assert_eq!(
-            category_of(evaluate_5(hand5("As Ks Qs Js Ts"))),
+            evaluate_5(hand5("As Ks Qs Js Ts")).category(),
             HandCategory::StraightFlush
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("5s 4s 3s 2s As"))),
+            evaluate_5(hand5("5s 4s 3s 2s As")).category(),
             HandCategory::StraightFlush
         ); // wheel
         assert_eq!(
-            category_of(evaluate_5(hand5("Ah Ad As Ac Kh"))),
+            evaluate_5(hand5("Ah Ad As Ac Kh")).category(),
             HandCategory::FourOfAKind
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("Ah Ad As Kh Kd"))),
+            evaluate_5(hand5("Ah Ad As Kh Kd")).category(),
             HandCategory::FullHouse
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("Ah 9h 7h 4h 2h"))),
+            evaluate_5(hand5("Ah 9h 7h 4h 2h")).category(),
             HandCategory::Flush
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("9h 8d 7s 6h 5c"))),
+            evaluate_5(hand5("9h 8d 7s 6h 5c")).category(),
             HandCategory::Straight
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("Ah Ad As Kh Qd"))),
+            evaluate_5(hand5("Ah Ad As Kh Qd")).category(),
             HandCategory::ThreeOfAKind
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("Ah Ad Kh Kd Qc"))),
+            evaluate_5(hand5("Ah Ad Kh Kd Qc")).category(),
             HandCategory::TwoPair
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("Ah Ad Kh Qd Jc"))),
+            evaluate_5(hand5("Ah Ad Kh Qd Jc")).category(),
             HandCategory::Pair
         );
         assert_eq!(
-            category_of(evaluate_5(hand5("Ah Kd Qh Jd 9c"))),
+            evaluate_5(hand5("Ah Kd Qh Jd 9c")).category(),
             HandCategory::HighCard
         );
     }
@@ -437,14 +484,14 @@ mod tests {
         let best = evaluate_7(hand7("2c 3d Ah Ad Kh Kd Qh"));
         let expected = evaluate_5(hand5("Ah Ad Kh Kd Qh"));
         assert_eq!(best, expected);
-        assert_eq!(category_of(best), HandCategory::TwoPair);
+        assert_eq!(best.category(), HandCategory::TwoPair);
     }
 
     #[test]
     fn evaluate_7_finds_straight_using_board_and_hole_cards() {
         // Hole: 9h 8d, board: 7s 6h 5c 2d 2s -> best is 9-high straight.
         let best = evaluate_7(hand7("9h 8d 7s 6h 5c 2d 2s"));
-        assert_eq!(category_of(best), HandCategory::Straight);
+        assert_eq!(best.category(), HandCategory::Straight);
         let expected = evaluate_5(hand5("9h 8d 7s 6h 5c"));
         assert_eq!(best, expected);
     }
@@ -461,8 +508,8 @@ mod tests {
                 for c in (b + 1)..52 {
                     for d in (c + 1)..52 {
                         for e in (d + 1)..52 {
-                            let hand = [a, b, c, d, e];
-                            let fast = evaluate_5(hand);
+                            let hand = [a, b, c, d, e].map(Card);
+                            let fast = score_5(hand);
                             let reference = evaluate_5_reference(hand);
                             assert_eq!(fast, reference, "mismatch for hand {hand:?}");
                             checked += 1;

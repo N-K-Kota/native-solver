@@ -12,7 +12,7 @@ impl Trainer {
         updating: Option<usize>,
     ) -> [Vec<f64>; 2] {
         match node {
-            Node::Terminal(t) => self.terminal_value(t, reach, board, board_eval),
+            Node::Terminal(t) => self.game.terminal_value(t, reach, board, board_eval),
             Node::Chance { children } => {
                 self.legacy_chance_value(children, reach, board, update, updating)
             }
@@ -23,9 +23,9 @@ impl Trainer {
                 children,
             } => {
                 let p = player.index();
-                let num_own_combos = self.combos[p].len();
-                let num_other_combos = self.combos[1 - p].len();
-                let (num_buckets, buckets) = self.combo_buckets(p, board);
+                let num_own_combos = self.game.combos[p].len();
+                let num_other_combos = self.game.combos[1 - p].len();
+                let (num_buckets, buckets) = self.game.combo_buckets(p, board);
                 let strategy = self.current_strategy(*id, actions.len(), num_buckets);
 
                 let child_cfvs: Vec<[Vec<f64>; 2]> = children
@@ -77,11 +77,11 @@ impl Trainer {
                 // regret update this replaces (`own[i] - own_cfv[i]`, no
                 // reach weighting at all), so this is an exact
                 // generalization, not a behavior change, for that case.
-                let board_set = set_from_cards(board);
+                let board_set = mask_of(board);
                 let effective_reach: Vec<f64> = (0..num_own_combos)
                     .map(|i| {
-                        let [h1, h2] = self.combos[p][i].cards;
-                        if set_contains(board_set, h1) || set_contains(board_set, h2) {
+                        let [h1, h2] = self.game.combos[p][i].cards;
+                        if mask_has(board_set, h1) || mask_has(board_set, h2) {
                             0.0
                         } else {
                             reach[p][i]
@@ -165,6 +165,7 @@ impl Trainer {
                 child_board.push(rep);
                 let empty_eval = [Vec::new(), Vec::new()];
                 let child_board_eval = self
+                    .game
                     .board_eval_cache
                     .get(&child_board)
                     .unwrap_or(&empty_eval);
@@ -180,8 +181,8 @@ impl Trainer {
             })
             .collect();
 
-        let mut cfv0 = vec![0.0; self.combos[0].len()];
-        let mut cfv1 = vec![0.0; self.combos[1].len()];
+        let mut cfv0 = vec![0.0; self.game.combos[0].len()];
+        let mut cfv1 = vec![0.0; self.game.combos[1].len()];
 
         for (members, rep_cfv) in &class_results {
             let rep = members[0];
@@ -190,8 +191,10 @@ impl Trainer {
                     (rep_cfv[0].clone(), rep_cfv[1].clone())
                 } else {
                     (
-                        self.relabel_cfv(0, &rep_cfv[0], suit(rep), suit(card)),
-                        self.relabel_cfv(1, &rep_cfv[1], suit(rep), suit(card)),
+                        self.game
+                            .relabel_cfv(0, &rep_cfv[0], rep.suit(), card.suit()),
+                        self.game
+                            .relabel_cfv(1, &rep_cfv[1], rep.suit(), card.suit()),
                     )
                 };
                 for (
@@ -199,7 +202,7 @@ impl Trainer {
                     &Combo {
                         cards: [h1, h2], ..
                     },
-                ) in self.combos[0].iter().enumerate()
+                ) in self.game.combos[0].iter().enumerate()
                 {
                     if h1 != card && h2 != card {
                         cfv0[i] += cfv0_card[i];
@@ -210,7 +213,7 @@ impl Trainer {
                     &Combo {
                         cards: [h1, h2], ..
                     },
-                ) in self.combos[1].iter().enumerate()
+                ) in self.game.combos[1].iter().enumerate()
                 {
                     if h1 != card && h2 != card {
                         cfv1[j] += cfv1_card[j];
@@ -240,16 +243,23 @@ impl Trainer {
             let iteration = self.iterations_completed.checked_add(1).unwrap();
             let update = self.algorithm.iteration(iteration);
             let reach: [Vec<f64>; 2] =
-                std::array::from_fn(|p| self.combos[p].iter().map(|c| c.weight).collect());
+                std::array::from_fn(|p| self.game.combos[p].iter().map(|c| c.weight).collect());
             let updating = match self.update_schedule {
                 UpdateSchedule::Simultaneous => None,
                 UpdateSchedule::Alternating => {
-                    self.legacy_cfr(&self.tree.root, &reach, &board, board_eval, update, Some(0));
+                    self.legacy_cfr(
+                        &self.game.tree.root,
+                        &reach,
+                        &board,
+                        board_eval,
+                        update,
+                        Some(0),
+                    );
                     Some(1)
                 }
             };
             let cfv = self.legacy_cfr(
-                &self.tree.root,
+                &self.game.tree.root,
                 &reach,
                 &board,
                 board_eval,
@@ -259,7 +269,7 @@ impl Trainer {
             last = std::array::from_fn(|p| {
                 cfv[p]
                     .iter()
-                    .zip(&self.combos[p])
+                    .zip(&self.game.combos[p])
                     .map(|(v, c)| v * c.weight)
                     .sum()
             });
@@ -284,23 +294,23 @@ fn assert_bits(a: &[Vec<f64>], b: &[Vec<f64>]) {
 fn target_values_match_frozen_traversal_bit_for_bit() {
     use crate::solver::Chips;
     use crate::solver::{build_tree, GameConfig};
-    use crate::{card_from_str, range::Range};
+    use crate::{range::Range, Card};
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
         .unwrap();
     pool.install(|| {
         for board_text in ["Ks7d2c", "Ks7s2s", "2c7c9dJd", "2c7c9dJd3h"] {
-            let board: Vec<_> = board_text.as_bytes().as_chunks::<2>().0.iter().map(|c|card_from_str(std::str::from_utf8(c).unwrap()).unwrap()).collect();
+            let board: Vec<_> = board_text.as_bytes().as_chunks::<2>().0.iter().map(|c|(std::str::from_utf8(c).unwrap()).parse::<Card>().unwrap()).collect();
             for iso in [false,true] { for bucketed in [false,true] {
                 let cfg=GameConfig{board:board.clone(),pot:Chips::whole(100),effective_stack:Chips::whole(100),bet_sizes:vec![1.0],max_raises:0,suit_isomorphism:iso};
-                let mut combos=["AA:0.5,KK,QQ", "KK:0.25,JJ,TT"].map(|s|Range::parse(s).unwrap().combos(set_from_cards(&board)));
+                let mut combos=["AA:0.5,KK,QQ", "KK:0.25,JJ,TT"].map(|s|Range::parse(s).unwrap().combos(CardSet::from_cards(&board)));
                 // Preserve suit symmetry while including zero own reach and
                 // blocked/overlapping private deals in bucket and chance paths.
-                for c in &mut combos[0] { if rank(c.cards[0])==10 && rank(c.cards[1])==10 {c.weight=0.0;} }
+                for c in &mut combos[0] { if c.cards[0].rank()==10 && c.cards[1].rank()==10 {c.weight=0.0;} }
                 for algorithm in [SolverAlgorithm::Cfr,SolverAlgorithm::CfrPlus,SolverAlgorithm::Dcfr] {
                     for schedule in [UpdateSchedule::Simultaneous,UpdateSchedule::Alternating] {
-                        let make=||Trainer::new(build_tree(&cfg).unwrap(), board.clone(), combos.clone(), TrainerOptions { algorithm, schedule, abstraction: if bucketed {CardAbstraction{flop:Some(2),turn:Some(2),river:Some(2)}} else {CardAbstraction::default()} }).unwrap();
+                        let make=||Trainer::new(build_tree(&cfg).unwrap(), combos.clone(), TrainerOptions { algorithm, schedule, abstraction: if bucketed {CardAbstraction{flop:Some(2),turn:Some(2),river:Some(2)}} else {CardAbstraction::default()} }).unwrap();
                         let mut candidate=make();let mut legacy=make();
                         for batch in [0,1,3] {
                             assert_eq!(candidate.train(batch).map(f64::to_bits),legacy.legacy_train(batch).map(f64::to_bits),"{board_text} iso={iso} bucketed={bucketed} {algorithm:?} {schedule:?}");
@@ -312,7 +322,7 @@ fn target_values_match_frozen_traversal_bit_for_bit() {
                             }
                             let a=candidate.exploitability();let b=legacy.exploitability();
                             assert_eq!([a.oop,a.ip,a.total].map(f64::to_bits),[b.oop,b.ip,b.total].map(f64::to_bits));
-                            assert_eq!(candidate.evaluate().1.map(f64::to_bits),legacy.evaluate().1.map(f64::to_bits));
+                            assert_eq!(candidate.evaluate().root_values.map(f64::to_bits),legacy.evaluate().root_values.map(f64::to_bits));
                         }
                     }
                 }
@@ -325,13 +335,13 @@ fn target_values_match_frozen_traversal_bit_for_bit() {
 fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
     use crate::solver::Chips;
     use crate::{
-        card_from_str,
         range::Range,
         solver::{build_tree, GameConfig},
+        Card,
     };
     use std::sync::atomic::Ordering;
     let board = ["2c", "7d", "9h", "Ks", "3c"]
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .to_vec();
     let cfg = GameConfig {
         board: board.clone(),
@@ -342,11 +352,10 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
         suit_isomorphism: false,
     };
     let combos = ["AA:0.5,QQ", "KK,JJ:0.25"]
-        .map(|s| Range::parse(s).unwrap().combos(set_from_cards(&board)));
+        .map(|s| Range::parse(s).unwrap().combos(CardSet::from_cards(&board)));
     let make = || {
         Trainer::new(
             build_tree(&cfg).unwrap(),
-            board.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm: SolverAlgorithm::Dcfr,
@@ -365,6 +374,7 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
     // iterations. New path: 5 OOP passes + 5 IP passes + final IP's OOP vector.
     assert_eq!(
         legacy
+            .game
             .terminal_calls
             .each_ref()
             .map(|c| c.load(Ordering::Relaxed)),
@@ -372,6 +382,7 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
     );
     assert_eq!(
         candidate
+            .game
             .terminal_calls
             .each_ref()
             .map(|c| c.load(Ordering::Relaxed)),
@@ -383,14 +394,14 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
 fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
     use crate::solver::Chips;
     use crate::{
-        card_from_str,
         solver::{build_tree, GameConfig},
+        Card,
     };
     let board = ["2h", "3d", "7c", "9s", "Jd"]
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .to_vec();
     let make_combo =
-        |a: &str, b: &str, w| Combo::new(card_from_str(a).unwrap(), card_from_str(b).unwrap(), w);
+        |a: &str, b: &str, w| Combo::new(a.parse::<Card>().unwrap(), b.parse::<Card>().unwrap(), w);
     // The two kings tie below AA, so requesting three buckets produces
     // [0, 0, 2]: max(bucket)+1 equals combo count despite a merged bucket.
     let combos = [
@@ -423,7 +434,6 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
                 let make = || {
                     Trainer::new(
                         build_tree(&cfg).unwrap(),
-                        board.clone(),
                         combos.clone(),
                         TrainerOptions {
                             algorithm,
@@ -439,9 +449,9 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
                 let mut candidate = make();
                 let mut legacy = make();
                 if bucketed {
-                    assert_eq!(candidate.combo_buckets(0, &board), (3, &[0, 0, 2][..]));
+                    assert_eq!(candidate.game.combo_buckets(0, &board), (3, &[0, 0, 2][..]));
                 } else {
-                    assert!(candidate.bucket_maps.is_empty());
+                    assert!(candidate.game.bucket_maps.is_empty());
                 }
                 for batch in [0, 1, 25, 75] {
                     assert_eq!(
@@ -459,8 +469,8 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
                         legacy.exploitability().total.to_bits()
                     );
                     assert_eq!(
-                        candidate.evaluate().1.map(f64::to_bits),
-                        legacy.evaluate().1.map(f64::to_bits)
+                        candidate.evaluate().root_values.map(f64::to_bits),
+                        legacy.evaluate().root_values.map(f64::to_bits)
                     );
                 }
             }
@@ -472,9 +482,9 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
 fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
     use crate::solver::Chips;
     use crate::{
-        card_from_str,
         range::Range,
         solver::{build_tree, GameConfig},
+        Card,
     };
     for threads in [1, 2, 4] {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -483,12 +493,12 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
             .unwrap();
         pool.install(|| {
             let board = ["2c", "7c", "9d", "Jd"]
-                .map(|s| card_from_str(s).unwrap())
+                .map(|s| s.parse::<Card>().unwrap())
                 .to_vec();
             let mut combos = ["AA:0.5,QQ", "JJ"]
-                .map(|s| Range::parse(s).unwrap().combos(set_from_cards(&board)));
+                .map(|s| Range::parse(s).unwrap().combos(CardSet::from_cards(&board)));
             for combo in &mut combos[0] {
-                if rank(combo.cards[0]) == rank(card_from_str("Qc").unwrap()) {
+                if combo.cards[0].rank() == "Qc".parse::<Card>().unwrap().rank() {
                     combo.weight = 0.0;
                 }
             }
@@ -513,7 +523,6 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
                             let make = || {
                                 Trainer::new(
                                     build_tree(&cfg).unwrap(),
-                                    board.clone(),
                                     combos.clone(),
                                     TrainerOptions {
                                         algorithm,
@@ -549,8 +558,8 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
                                     legacy.exploitability().total.to_bits()
                                 );
                                 assert_eq!(
-                                    candidate.evaluate().1.map(f64::to_bits),
-                                    legacy.evaluate().1.map(f64::to_bits)
+                                    candidate.evaluate().root_values.map(f64::to_bits),
+                                    legacy.evaluate().root_values.map(f64::to_bits)
                                 );
                             }
                         }

@@ -6,12 +6,16 @@ another calculation.
 
 ## Cards and combos
 
-- A `Card` is a `u8` in `0..52`, encoded as `rank * 4 + suit`. Ranks run
-  `23456789TJQKA` (`0` is a deuce, `12` an ace). Suits run `cdhs`.
-- A `CardSet` is a `u64` bitmask with bit `card` set for each card.
-- `Range::parse` takes the 169 canonical hands (`AA`, `AKs`, `AKo`, …), each
-  with an optional `:weight` in `0.0..=1.0`. Two different ranks need an `s`
-  or `o` marker.
+- A `Card` is one of the 52 cards, with index `rank * 4 + suit` in `0..52`
+  (`Card::index`). Ranks run `23456789TJQKA` (`0` is a deuce, `12` an
+  ace). Suits run `cdhs`. Parse one with `"As".parse::<Card>()`; it
+  displays the same way.
+- A `CardSet` is a set of cards, stored as a bitmask with bit
+  `card.index()` set for each card.
+- `Range::parse` (or `str::parse`) takes the 169 canonical hands (`AA`,
+  `AKs`, `AKo`, …), each with an optional `:weight` in `0.0..=1.0`. Two
+  different ranks need an `s` or `o` marker. A range displays in the same
+  notation.
 - `Range::combos(dead)` expands a range into `Combo { cards, weight }`
   values and drops every combo that shares a card with `dead`. The order is
   deterministic: by lower card, then higher card.
@@ -45,7 +49,7 @@ combo.
 | API | What it returns |
 | --- | --- |
 | `Trainer::train` | Root `[OOP, IP]` raw range-weighted values under the last iteration's current strategy. A progress signal, not an EV. |
-| `evaluate().1` | Root `[OOP, IP]` raw range-weighted values under the average strategy. |
+| `evaluate().root_values` | Root `[OOP, IP]` raw range-weighted values under the average strategy. |
 | `NodeEvaluation::ev` | Per combo: the raw CFV divided by the opponent's compatible reach, which is the node EV in chips. `0.0` when no opponent combo is compatible. |
 | `NodeEvaluation::equity` | Per combo, complete boards only: showdown win probability against the opponent's compatible, reach-weighted range. Ties count half; `0.5` when nothing is compatible. |
 

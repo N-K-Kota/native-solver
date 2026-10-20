@@ -6,6 +6,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use native_solver::eval::{evaluate_5, evaluate_5_reference, evaluate_7};
+use native_solver::Card;
 
 /// Tiny xorshift PRNG so the sample is deterministic without adding a
 /// `rand` dependency just for benchmark inputs.
@@ -20,28 +21,28 @@ impl Xorshift {
     }
 }
 
-fn random_hand<const N: usize>(rng: &mut Xorshift) -> [u8; N] {
-    let mut cards = [0u8; N];
+fn random_hand<const N: usize>(rng: &mut Xorshift) -> [Card; N] {
+    let mut cards = [Card::from_index(0).unwrap(); N];
     let mut used = 0u64;
     let mut i = 0;
     while i < N {
         let c = (rng.next() % 52) as u8;
         if used & (1 << c) == 0 {
             used |= 1 << c;
-            cards[i] = c;
+            cards[i] = Card::from_index(c).unwrap();
             i += 1;
         }
     }
     cards
 }
 
-fn sample_hands<const N: usize>(count: usize) -> Vec<[u8; N]> {
+fn sample_hands<const N: usize>(count: usize) -> Vec<[Card; N]> {
     let mut rng = Xorshift(88172645463325252);
     (0..count).map(|_| random_hand::<N>(&mut rng)).collect()
 }
 
 fn bench_evaluate_5(c: &mut Criterion) {
-    let hands: Vec<[u8; 5]> = sample_hands(2000);
+    let hands: Vec<[Card; 5]> = sample_hands(2000);
 
     c.bench_function("evaluate_5 (table-driven)", |b| {
         b.iter(|| {
@@ -61,7 +62,7 @@ fn bench_evaluate_5(c: &mut Criterion) {
 }
 
 fn bench_evaluate_7(c: &mut Criterion) {
-    let hands: Vec<[u8; 7]> = sample_hands(2000);
+    let hands: Vec<[Card; 7]> = sample_hands(2000);
 
     c.bench_function("evaluate_7 (best-of-21, table-driven evaluate_5)", |b| {
         b.iter(|| {

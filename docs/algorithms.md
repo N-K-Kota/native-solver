@@ -31,8 +31,8 @@ numbered from one.
 | Algorithm | Regret after adding the iteration's delta | Average strategy |
 | --- | --- | --- |
 | `Cfr` | kept as is | uniform weights |
-| `CfrPlus` (default) | clipped at `0` after the whole delta is added | uniform weights, no delay |
-| `Dcfr` | positive × `t^1.5 / (t^1.5 + 1)`, negative × `1/2` | discounted by `(t / (t + 1))^2`, which gives iteration `s` relative weight `s^2` |
+| `CfrPlus` | clipped at `0` after the whole delta is added | uniform weights, no delay |
+| `Dcfr` (default) | positive × `t^1.5 / (t^1.5 + 1)`, negative × `1/2` | discounted by `(t / (t + 1))^2`, which gives iteration `s` relative weight `s^2` |
 
 `Dcfr` uses the fixed parameters `(alpha, beta, gamma) = (1.5, 0, 2)` from
 Brown and Sandholm, "Solving Imperfect-Information Games via Discounted
@@ -73,3 +73,6 @@ snapshot. The restored policy reads bit-identically.
 `Range::combos` returns combos in a fixed order, and the trainer keeps that
 order. Results depend on the order of floating-point operations: reordering
 combos or swapping the two cards inside a combo can change the last bits.
+The thread count does not: each decision node is updated once per pass, by
+the one traversal path that reaches it, and parallel child values are
+combined in a fixed order.
