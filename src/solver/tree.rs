@@ -38,7 +38,7 @@ pub struct GameConfig {
     /// per class (via a representative card) and `cfr.rs` derives the
     /// other members' counterfactual values by relabeling combo indices
     /// under the corresponding suit swap. When `false`, every class is a
-    /// singleton (one card each) — the old, unreduced behavior.
+    /// singleton (one card each): the unreduced tree.
     pub suit_isomorphism: bool,
 }
 
@@ -52,6 +52,9 @@ pub enum Player {
 }
 
 impl Player {
+    /// Both players in index order, so `Player::ALL[i].index() == i`.
+    pub const ALL: [Player; 2] = [Player::Oop, Player::Ip];
+
     /// The opponent.
     pub fn other(self) -> Player {
         match self {
@@ -139,6 +142,7 @@ pub enum Node {
 
 /// Why a board was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BoardError {
     /// The board must have 3 (flop), 4 (turn), or 5 (river) cards.
     WrongSize {
@@ -195,6 +199,7 @@ pub(crate) fn validate_board(board: &[Card]) -> Result<(), BoardError> {
 
 /// Why a betting tree was not built.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TreeError {
     /// `GameConfig::board` is not a legal flop, turn, or river.
     Board(BoardError),

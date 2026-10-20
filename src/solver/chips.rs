@@ -17,10 +17,7 @@ const MAX_UNITS: f64 = 9_007_199_254_740_992.0;
 /// An exact chip amount, stored as an integer count of `1 / CHIP_SCALE`
 /// input chips. Build one with [`Chips::whole`] or [`Chips::from_f64`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Chips(
-    /// The amount in internal units (`CHIP_SCALE` units per input chip).
-    pub i64,
-);
+pub struct Chips(pub(crate) i64);
 
 impl Chips {
     /// No chips.
@@ -29,6 +26,17 @@ impl Chips {
     /// A whole number of input chips.
     pub const fn whole(chips: i64) -> Chips {
         Chips(chips * CHIP_SCALE)
+    }
+
+    /// An amount in internal units of `1 / CHIP_SCALE` input chips, so
+    /// `Chips::from_units(CHIP_SCALE)` is one chip.
+    pub const fn from_units(units: i64) -> Chips {
+        Chips(units)
+    }
+
+    /// The amount in internal units of `1 / CHIP_SCALE` input chips.
+    pub const fn units(self) -> i64 {
+        self.0
     }
 
     /// Converts an input-chip amount that is a multiple of `1 / CHIP_SCALE`

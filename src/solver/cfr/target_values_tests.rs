@@ -12,7 +12,7 @@ impl Trainer {
         updating: Option<usize>,
     ) -> [Vec<f64>; 2] {
         match node {
-            Node::Terminal(t) => self.terminal_value(t, reach, board, board_eval),
+            Node::Terminal(t) => self.game.terminal_value(t, reach, board, board_eval),
             Node::Chance { children } => {
                 self.legacy_chance_value(children, reach, board, update, updating)
             }
@@ -23,9 +23,9 @@ impl Trainer {
                 children,
             } => {
                 let p = player.index();
-                let num_own_combos = self.combos[p].len();
-                let num_other_combos = self.combos[1 - p].len();
-                let (num_buckets, buckets) = self.combo_buckets(p, board);
+                let num_own_combos = self.game.combos[p].len();
+                let num_other_combos = self.game.combos[1 - p].len();
+                let (num_buckets, buckets) = self.game.combo_buckets(p, board);
                 let strategy = self.current_strategy(*id, actions.len(), num_buckets);
 
                 let child_cfvs: Vec<[Vec<f64>; 2]> = children
@@ -80,7 +80,7 @@ impl Trainer {
                 let board_set = set_from_cards(board);
                 let effective_reach: Vec<f64> = (0..num_own_combos)
                     .map(|i| {
-                        let [h1, h2] = self.combos[p][i].cards;
+                        let [h1, h2] = self.game.combos[p][i].cards;
                         if set_contains(board_set, h1) || set_contains(board_set, h2) {
                             0.0
                         } else {
@@ -165,6 +165,7 @@ impl Trainer {
                 child_board.push(rep);
                 let empty_eval = [Vec::new(), Vec::new()];
                 let child_board_eval = self
+                    .game
                     .board_eval_cache
                     .get(&child_board)
                     .unwrap_or(&empty_eval);
@@ -180,8 +181,8 @@ impl Trainer {
             })
             .collect();
 
-        let mut cfv0 = vec![0.0; self.combos[0].len()];
-        let mut cfv1 = vec![0.0; self.combos[1].len()];
+        let mut cfv0 = vec![0.0; self.game.combos[0].len()];
+        let mut cfv1 = vec![0.0; self.game.combos[1].len()];
 
         for (members, rep_cfv) in &class_results {
             let rep = members[0];
@@ -190,8 +191,8 @@ impl Trainer {
                     (rep_cfv[0].clone(), rep_cfv[1].clone())
                 } else {
                     (
-                        self.relabel_cfv(0, &rep_cfv[0], suit(rep), suit(card)),
-                        self.relabel_cfv(1, &rep_cfv[1], suit(rep), suit(card)),
+                        self.game.relabel_cfv(0, &rep_cfv[0], suit(rep), suit(card)),
+                        self.game.relabel_cfv(1, &rep_cfv[1], suit(rep), suit(card)),
                     )
                 };
                 for (
@@ -199,7 +200,7 @@ impl Trainer {
                     &Combo {
                         cards: [h1, h2], ..
                     },
-                ) in self.combos[0].iter().enumerate()
+                ) in self.game.combos[0].iter().enumerate()
                 {
                     if h1 != card && h2 != card {
                         cfv0[i] += cfv0_card[i];
@@ -210,7 +211,7 @@ impl Trainer {
                     &Combo {
                         cards: [h1, h2], ..
                     },
-                ) in self.combos[1].iter().enumerate()
+                ) in self.game.combos[1].iter().enumerate()
                 {
                     if h1 != card && h2 != card {
                         cfv1[j] += cfv1_card[j];
@@ -240,16 +241,23 @@ impl Trainer {
             let iteration = self.iterations_completed.checked_add(1).unwrap();
             let update = self.algorithm.iteration(iteration);
             let reach: [Vec<f64>; 2] =
-                std::array::from_fn(|p| self.combos[p].iter().map(|c| c.weight).collect());
+                std::array::from_fn(|p| self.game.combos[p].iter().map(|c| c.weight).collect());
             let updating = match self.update_schedule {
                 UpdateSchedule::Simultaneous => None,
                 UpdateSchedule::Alternating => {
-                    self.legacy_cfr(&self.tree.root, &reach, &board, board_eval, update, Some(0));
+                    self.legacy_cfr(
+                        &self.game.tree.root,
+                        &reach,
+                        &board,
+                        board_eval,
+                        update,
+                        Some(0),
+                    );
                     Some(1)
                 }
             };
             let cfv = self.legacy_cfr(
-                &self.tree.root,
+                &self.game.tree.root,
                 &reach,
                 &board,
                 board_eval,
@@ -259,7 +267,7 @@ impl Trainer {
             last = std::array::from_fn(|p| {
                 cfv[p]
                     .iter()
-                    .zip(&self.combos[p])
+                    .zip(&self.game.combos[p])
                     .map(|(v, c)| v * c.weight)
                     .sum()
             });
@@ -365,6 +373,7 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
     // iterations. New path: 5 OOP passes + 5 IP passes + final IP's OOP vector.
     assert_eq!(
         legacy
+            .game
             .terminal_calls
             .each_ref()
             .map(|c| c.load(Ordering::Relaxed)),
@@ -372,6 +381,7 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
     );
     assert_eq!(
         candidate
+            .game
             .terminal_calls
             .each_ref()
             .map(|c| c.load(Ordering::Relaxed)),
@@ -439,9 +449,9 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
                 let mut candidate = make();
                 let mut legacy = make();
                 if bucketed {
-                    assert_eq!(candidate.combo_buckets(0, &board), (3, &[0, 0, 2][..]));
+                    assert_eq!(candidate.game.combo_buckets(0, &board), (3, &[0, 0, 2][..]));
                 } else {
-                    assert!(candidate.bucket_maps.is_empty());
+                    assert!(candidate.game.bucket_maps.is_empty());
                 }
                 for batch in [0, 1, 25, 75] {
                     assert_eq!(

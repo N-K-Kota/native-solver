@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 /// Why a range spec or hand weight was rejected.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RangeError {
     /// A `hand:weight` token whose weight is not a number.
     InvalidWeight {
@@ -54,7 +55,9 @@ impl std::error::Error for RangeError {}
 pub struct Combo {
     /// The two hole cards, in no guaranteed order.
     pub cards: [Card; 2],
-    /// The combo's range weight, in `0.0..=1.0`.
+    /// The combo's range weight. [`Range::combos`] yields weights in
+    /// `0.0..=1.0`; the trainer accepts any finite, nonnegative weight, and
+    /// only the ratios between weights in one range matter.
     pub weight: f64,
 }
 

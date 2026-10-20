@@ -127,7 +127,7 @@ fn bucket_assignments_follow_hand_strength() {
     let (assigned_board, maps) = assignments[0];
     assert_eq!(assigned_board, river.as_slice());
 
-    for (player, map) in maps.iter().enumerate() {
+    for (player, map) in Player::ALL.into_iter().zip(maps) {
         let combos = game.combos(player);
         assert_eq!(map.len(), combos.len());
         assert!(map.iter().all(|&bucket| bucket < buckets));
@@ -139,10 +139,10 @@ fn bucket_assignments_follow_hand_strength() {
         for i in 0..combos.len() {
             for j in 0..combos.len() {
                 if score(&combos[i]) < score(&combos[j]) {
-                    assert!(map[i] <= map[j], "player {player}: {i} vs {j}");
+                    assert!(map[i] <= map[j], "player {player:?}: {i} vs {j}");
                 }
                 if score(&combos[i]) == score(&combos[j]) {
-                    assert_eq!(map[i], map[j], "player {player}: tie {i} vs {j}");
+                    assert_eq!(map[i], map[j], "player {player:?}: tie {i} vs {j}");
                 }
             }
         }

@@ -10,35 +10,37 @@
 //! This end-of-iteration convention gives strategy contribution `s` weight
 //! `s^2 / (T+1)^2` after `T` iterations, hence relative weights `s^2`.
 
-/// Update policy for the heads-up trainer; independent of the game tree.
+/// The regret and average-strategy update rule; independent of the game tree.
 ///
-/// Update order is independently selected by [`UpdateSchedule`]. Existing
-/// constructors retain simultaneous updates; alternating updates are opt-in.
+/// The player-update order is chosen separately with [`UpdateSchedule`].
+/// [`Dcfr`](Self::Dcfr), the default, usually converges fastest.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SolverAlgorithm {
     /// Vanilla regret matching and uniformly weighted average strategies.
     Cfr,
-    /// Legacy regret-matching+ with uniform averaging and no delay.
+    /// Regret matching+ (accumulated regrets clipped at zero) with uniformly
+    /// weighted average strategies and no averaging delay.
     ///
-    /// This preserves the existing trainer exactly. It is not the usual
-    /// alternating-update, linearly weighted CFR+ implementation, nor the
+    /// This is not the linearly weighted CFR+ of the original paper, nor the
     /// quadratically weighted CFR+ baseline used in the DCFR paper.
-    #[default]
     CfrPlus,
     /// Discounted CFR with fixed `(alpha, beta, gamma) = (1.5, 0, 2)`.
     /// Negative accumulated regrets are discounted, not clipped to zero.
+    #[default]
     Dcfr,
 }
 
 /// Player update order, independent of regret discounting and averaging.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UpdateSchedule {
-    /// Both players use the same pre-iteration strategy profile (legacy).
+    /// Both players update against the same pre-iteration strategy profile.
     #[default]
     Simultaneous,
     /// One iteration updates OOP, then IP against the updated OOP strategy.
     /// Each player's regrets and average strategy are updated exactly once.
-    /// This uses two full traversals, with the existing own-reach averaging.
+    /// This uses two full traversals, each averaging by the updating player's
+    /// own reach.
     Alternating,
 }
 
@@ -70,8 +72,8 @@ impl SolverAlgorithm {
 
 impl IterationUpdate {
     /// Apply exactly one infoset/action update after its regret contributions
-    /// have been reduced. The legacy modes preserve the original operation
-    /// order, including clipping only after the whole delta is added.
+    /// have been reduced. CFR+ clips at zero only after the whole delta is
+    /// added.
     pub(crate) fn regret(self, previous: f64, delta: f64) -> f64 {
         let accumulated = previous + delta;
         match self {
@@ -144,8 +146,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_updates_keep_undiscounted_uniform_sums() {
-        assert_eq!(SolverAlgorithm::default(), SolverAlgorithm::CfrPlus);
+    fn cfr_and_cfr_plus_keep_undiscounted_uniform_sums() {
+        assert_eq!(SolverAlgorithm::default(), SolverAlgorithm::Dcfr);
         for t in [1, 2, 100, u64::MAX] {
             let vanilla = SolverAlgorithm::Cfr.iteration(t);
             let plus = SolverAlgorithm::CfrPlus.iteration(t);

@@ -17,7 +17,7 @@ use native_solver::solver::quality::ReferenceEvaluator;
 use native_solver::solver::Chips;
 use native_solver::solver::TrainerOptions;
 use native_solver::solver::{
-    build_tree_bounded, Exploitability, GameConfig, Node, SolverAlgorithm, Trainer,
+    build_tree_bounded, Exploitability, GameConfig, Node, Player, SolverAlgorithm, Trainer,
 };
 use rayon::ThreadPoolBuilder;
 use std::fmt::Write;
@@ -418,11 +418,12 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
     // combos only: impossible rows have no meaning and must not affect output.
     // Calculation is excluded from solve/evaluate timing, included in total.
     let mut players = vec![0; decision_nodes];
-    collect_players(trainer.tree(), &mut players);
+    collect_players(trainer.game().tree(), &mut players);
     for (node_id, &player) in players.iter().enumerate() {
-        let board_mask = set_from_cards(trainer.node_board(node_id));
+        let board_mask = set_from_cards(trainer.game().node_board(node_id));
         let live: Vec<bool> = trainer
-            .combos(player)
+            .game()
+            .combos(Player::ALL[player])
             .iter()
             .map(|c| !set_contains(board_mask, c.cards[0]) && !set_contains(board_mask, c.cards[1]))
             .collect();
@@ -489,9 +490,9 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
     let reference_json = if options.reference {
         let start = Instant::now();
         let evaluator = ReferenceEvaluator::new(
-            trainer.tree(),
+            trainer.game().tree(),
             &cfg.board,
-            [trainer.combos(0), trainer.combos(1)],
+            Player::ALL.map(|player| trainer.game().combos(player)),
         )
         .map_err(|e| e.to_string())?;
         let quality = evaluator
@@ -580,6 +581,7 @@ fn algorithm_name(algorithm: SolverAlgorithm) -> &'static str {
         SolverAlgorithm::Cfr => "cfr",
         SolverAlgorithm::CfrPlus => "cfr-plus",
         SolverAlgorithm::Dcfr => "dcfr",
+        other => unimplemented!("no command-line name for {other:?}"),
     }
 }
 

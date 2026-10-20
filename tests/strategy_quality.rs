@@ -106,9 +106,9 @@ fn uniform(node: &Node, sizes: [usize; 2]) -> HashMap<usize, Vec<Vec<f64>>> {
 
 fn compare_trainer(trainer: &Trainer, initial_board: &[Card]) -> StrategyQuality {
     let evaluator = ReferenceEvaluator::new(
-        trainer.tree(),
+        trainer.game().tree(),
         initial_board,
-        [trainer.combos(0), trainer.combos(1)],
+        Player::ALL.map(|player| trainer.game().combos(player)),
     )
     .unwrap();
     let reference = evaluator

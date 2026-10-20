@@ -25,6 +25,7 @@ pub fn suit(card: Card) -> u8 {
 
 /// Why a card string could not be parsed; each variant carries the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CardParseError {
     /// Not exactly two characters.
     Length(String),

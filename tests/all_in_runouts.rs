@@ -181,7 +181,7 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                 )
                 .unwrap();
                 assert_eq!(new.train(3), old.train(3));
-                compare_real_policies(new.tree(), old.tree(), &new, &old);
+                compare_real_policies(new.game().tree(), old.game().tree(), &new, &old);
                 let q = new.exploitability();
                 let previous = old.exploitability();
                 assert_eq!(
@@ -190,9 +190,12 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                 );
                 assert_eq!(new.evaluate().1, old.evaluate().1);
                 if !iso {
-                    let reference =
-                        ReferenceEvaluator::new(new.tree(), &board, [&combos[0], &combos[1]])
-                            .unwrap();
+                    let reference = ReferenceEvaluator::new(
+                        new.game().tree(),
+                        &board,
+                        [&combos[0], &combos[1]],
+                    )
+                    .unwrap();
                     let independent = reference.evaluate(|id| new.average_strategy(id)).unwrap();
                     assert!((independent.exploitability - q.total).abs() < 1e-9);
                 }

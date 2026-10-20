@@ -31,7 +31,6 @@ use crate::eval::evaluate_7;
 use crate::range::Combo;
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 mod reach_scratch;
@@ -76,7 +75,7 @@ impl TrainingPass {
 
 /// Learning state for one game: regret and strategy-sum tables plus the
 /// update policy. The immutable game definition is shared as
-/// `Arc<SolverGame>` (`Trainer` derefs to it), so a `Policy` snapshot can be
+/// `Arc<SolverGame>` (see [`Trainer::game`]), so a `Policy` snapshot can be
 /// evaluated without touching, or waiting for, the training tables.
 pub struct Trainer {
     game: Arc<SolverGame>,
@@ -85,13 +84,6 @@ pub struct Trainer {
     /// Full iterations completed across every call to `train`.
     iterations_completed: u64,
     node_data: Vec<Mutex<NodeData>>,
-}
-
-impl Deref for Trainer {
-    type Target = SolverGame;
-    fn deref(&self) -> &SolverGame {
-        &self.game
-    }
 }
 
 /// Normalized, suit-symmetrized average strategy for every decision node,
@@ -112,6 +104,7 @@ impl Policy {
 
 /// Why persisted policy rows do not fit a game (see `SolverGame::policy_from_rows`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PolicyError {
     /// The policy has a different number of decision nodes than the game.
     NodeCount {
@@ -156,6 +149,7 @@ impl std::error::Error for PolicyError {}
 
 /// Why [`Trainer::new`] rejected its inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrainerError {
     /// The initial board is not a legal flop, turn, or river.
     Board(BoardError),
@@ -493,7 +487,7 @@ pub struct SolverGame {
 }
 
 /// How a [`Trainer`] learns: the regret/averaging rule, the player-update
-/// order, and per-street card abstraction. `Default` is CFR+ with
+/// order, and per-street card abstraction. `Default` is DCFR with
 /// simultaneous updates and every street solved exactly.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TrainerOptions {
@@ -579,7 +573,7 @@ impl Trainer {
     /// `options` selects the regret/averaging rule, the player-update order
     /// (fixed for this trainer's lifetime, including across training batches;
     /// an alternating iteration is an OOP pass followed by an IP pass) and
-    /// per-street card abstraction. `TrainerOptions::default()` is CFR+ with
+    /// per-street card abstraction. `TrainerOptions::default()` is DCFR with
     /// simultaneous updates and no abstraction.
     ///
     /// Trees with grouped chance cards require ranges closed under every
@@ -784,8 +778,8 @@ impl Trainer {
                 .checked_add(1)
                 .expect("CFR iteration counter overflow");
             let update = self.algorithm.iteration(iteration);
-            let reach0: Vec<f64> = self.combos[0].iter().map(|c| c.weight).collect();
-            let reach1: Vec<f64> = self.combos[1].iter().map(|c| c.weight).collect();
+            let reach0: Vec<f64> = self.game.combos[0].iter().map(|c| c.weight).collect();
+            let reach1: Vec<f64> = self.game.combos[1].iter().map(|c| c.weight).collect();
             let reach = [reach0.as_slice(), reach1.as_slice()];
             let pass = match self.update_schedule {
                 UpdateSchedule::Simultaneous => TrainingPass {
@@ -795,7 +789,7 @@ impl Trainer {
                 },
                 UpdateSchedule::Alternating => {
                     self.cfr(
-                        &self.tree.root,
+                        &self.game.tree.root,
                         reach,
                         &board,
                         board_eval,
@@ -815,15 +809,15 @@ impl Trainer {
                     }
                 }
             };
-            let [cfv0, cfv1] = self.cfr(&self.tree.root, reach, &board, board_eval, pass);
+            let [cfv0, cfv1] = self.cfr(&self.game.tree.root, reach, &board, board_eval, pass);
             let ev0: f64 = cfv0
                 .iter()
-                .zip(&self.combos[0])
+                .zip(&self.game.combos[0])
                 .map(|(v, c)| v * c.weight)
                 .sum();
             let ev1: f64 = cfv1
                 .iter()
-                .zip(&self.combos[1])
+                .zip(&self.game.combos[1])
                 .map(|(v, c)| v * c.weight)
                 .sum();
             last = [ev0, ev1];
@@ -865,8 +859,8 @@ impl Trainer {
 
     /// Normalized strategy sums in bucket coordinates, suit-symmetrized.
     fn average_bucket_strategy(&self, node_id: usize) -> Vec<Vec<f64>> {
-        let (player, board) = &self.node_meta[node_id];
-        let (num_buckets, _) = self.combo_buckets(*player, board);
+        let (player, board) = &self.game.node_meta[node_id];
+        let (num_buckets, _) = self.game.combo_buckets(*player, board);
         let data = self.node_data[node_id].lock().unwrap();
         let num_actions = data.regret_sum.len();
         let mut bucket_strategy: Vec<Vec<f64>> = (0..num_actions)
@@ -883,7 +877,7 @@ impl Trainer {
                     .collect()
             })
             .collect();
-        self.symmetrize_strategy(node_id, &mut bucket_strategy);
+        self.game.symmetrize_strategy(node_id, &mut bucket_strategy);
         bucket_strategy
     }
 
@@ -907,7 +901,7 @@ impl Trainer {
                 }
             }
         }
-        self.symmetrize_strategy(id, &mut strategy);
+        self.game.symmetrize_strategy(id, &mut strategy);
         strategy
     }
 
@@ -926,7 +920,8 @@ impl Trainer {
         match node {
             Node::Terminal(t) => std::array::from_fn(|p| {
                 if pass.computes(p) {
-                    self.terminal_value_for_player(t, p, reach[1 - p], board, board_eval)
+                    self.game
+                        .terminal_value_for_player(t, p, reach[1 - p], board, board_eval)
                 } else {
                     Vec::new()
                 }
@@ -939,9 +934,9 @@ impl Trainer {
                 children,
             } => {
                 let p = player.index();
-                let num_own_combos = self.combos[p].len();
-                let num_other_combos = self.combos[1 - p].len();
-                let (num_buckets, buckets) = self.combo_buckets(p, board);
+                let num_own_combos = self.game.combos[p].len();
+                let num_other_combos = self.game.combos[1 - p].len();
+                let (num_buckets, buckets) = self.game.combo_buckets(p, board);
                 let strategy = self.current_strategy(*id, actions.len(), num_buckets);
 
                 let child_cfvs: Vec<[Vec<f64>; 2]> = children
@@ -998,7 +993,7 @@ impl Trainer {
                 // holes in a map while still sharing a bucket.
                 // Board-dead combos add no average-strategy mass, matching the
                 // bucketed path's `effective_reach` below.
-                if self.bucket_maps.is_empty() {
+                if self.game.bucket_maps.is_empty() {
                     let board_set = set_from_cards(board);
                     let mut data = self.node_data[*id].lock().unwrap();
                     for (a, cfv) in child_cfvs.iter().enumerate() {
@@ -1008,7 +1003,7 @@ impl Trainer {
                             let delta = 0.0 + (own - own_cfv[i]);
                             data.regret_sum[a][i] =
                                 pass.update.regret(data.regret_sum[a][i], delta);
-                            if !self.combos[p][i].conflicts_with(board_set) {
+                            if !self.game.combos[p][i].conflicts_with(board_set) {
                                 data.strategy_sum[a][i] += reach[p][i] * strategy[a][i];
                             }
                             data.strategy_sum[a][i] =
@@ -1039,7 +1034,7 @@ impl Trainer {
                 let board_set = set_from_cards(board);
                 let effective_reach: Vec<f64> = (0..num_own_combos)
                     .map(|i| {
-                        let [h1, h2] = self.combos[p][i].cards;
+                        let [h1, h2] = self.game.combos[p][i].cards;
                         if set_contains(board_set, h1) || set_contains(board_set, h2) {
                             0.0
                         } else {
@@ -1123,6 +1118,7 @@ impl Trainer {
                 child_board.push(rep);
                 let empty_eval = [Vec::new(), Vec::new()];
                 let child_board_eval = self
+                    .game
                     .board_eval_cache
                     .get(&child_board)
                     .unwrap_or(&empty_eval);
@@ -1135,7 +1131,7 @@ impl Trainer {
             vec![
                 0.0;
                 if pass.computes(p) {
-                    self.combos[p].len()
+                    self.game.combos[p].len()
                 } else {
                     0
                 }
@@ -1151,14 +1147,14 @@ impl Trainer {
                     let values = if card == rep {
                         rep_cfv[p].clone()
                     } else {
-                        self.relabel_cfv(p, &rep_cfv[p], suit(rep), suit(card))
+                        self.game.relabel_cfv(p, &rep_cfv[p], suit(rep), suit(card))
                     };
                     for (
                         i,
                         &Combo {
                             cards: [h1, h2], ..
                         },
-                    ) in self.combos[p].iter().enumerate()
+                    ) in self.game.combos[p].iter().enumerate()
                     {
                         if h1 != card && h2 != card {
                             out[p][i] += values[i];
@@ -1315,10 +1311,10 @@ impl SolverGame {
         &self.node_meta[node_id].1
     }
 
-    /// The combos (`card1, card2, range_weight`) for `Player::Oop`/`Player::Ip`
-    /// (index `0`/`1`), in the same order `average_strategy`'s combo axis uses.
-    pub fn combos(&self, player_index: usize) -> &[Combo] {
-        &self.combos[player_index]
+    /// `player`'s combos, in the order of every per-combo result (the combo
+    /// axis of `average_strategy`, `NodeEvaluation::ev`, and so on).
+    pub fn combos(&self, player: Player) -> &[Combo] {
+        &self.combos[player.index()]
     }
 
     /// The card abstraction setting this trainer was built with (see
@@ -3769,7 +3765,7 @@ mod tests {
         );
         assert_eq!(
             root_eval.ev.len(),
-            trainer.combos(0).len(),
+            trainer.game.combos(Player::Oop).len(),
             "EV should still be reported per combo"
         );
     }
@@ -3836,7 +3832,7 @@ mod tests {
         // converged average strategy its root EV should be close to
         // winning the pot every time it isn't check-through — strictly
         // positive, not just "in bounds".
-        let combos0 = trainer.combos(0);
+        let combos0 = trainer.game.combos(Player::Oop);
         for (
             i,
             &Combo {
@@ -4334,7 +4330,7 @@ mod terminal_regression_tests {
                 );
                 for phase in 0..3 {
                     let reach: [Vec<f64>; 2] = std::array::from_fn(|p| {
-                        (0..trainer.combos[p].len())
+                        (0..trainer.game.combos[p].len())
                             .map(|i| {
                                 if phase == 2 || (i + phase) % 5 == 0 {
                                     0.0
@@ -4360,22 +4356,26 @@ mod terminal_regression_tests {
                             invested: [37.0, 121.0],
                         },
                     ] {
-                        let scores = eval_combos_if_complete(&trainer.combos, &board);
+                        let scores = eval_combos_if_complete(&trainer.game.combos, &board);
                         trainer
+                            .game
                             .use_pairwise_terminals
                             .store(false, std::sync::atomic::Ordering::Relaxed);
-                        let actual = trainer.terminal_value(&terminal, &reach, &board, &scores);
+                        let actual = trainer
+                            .game
+                            .terminal_value(&terminal, &reach, &board, &scores);
                         if let Terminal::Showdown { invested } = &terminal {
                             for p in 0..2 {
-                                let before = trainer.terminal_index.showdown_before_rank_cache(
-                                    &trainer.combos,
-                                    p,
-                                    &reach[1 - p],
-                                    &scores,
-                                    &trainer.board_order_cache[&board],
-                                    set_from_cards(&board),
-                                    invested,
-                                );
+                                let before =
+                                    trainer.game.terminal_index.showdown_before_rank_cache(
+                                        &trainer.game.combos,
+                                        p,
+                                        &reach[1 - p],
+                                        &scores,
+                                        &trainer.game.board_order_cache[&board],
+                                        set_from_cards(&board),
+                                        invested,
+                                    );
                                 assert_eq!(
                                     actual[p].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
                                     before.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
@@ -4383,9 +4383,12 @@ mod terminal_regression_tests {
                             }
                         }
                         trainer
+                            .game
                             .use_pairwise_terminals
                             .store(true, std::sync::atomic::Ordering::Relaxed);
-                        let reference = trainer.terminal_value(&terminal, &reach, &board, &scores);
+                        let reference = trainer
+                            .game
+                            .terminal_value(&terminal, &reach, &board, &scores);
                         for p in 0..2 {
                             for (a, b) in actual[p].iter().zip(&reference[p]) {
                                 close(*a, *b);
@@ -4440,6 +4443,7 @@ mod terminal_regression_tests {
             )
             .unwrap();
             reference
+                .game
                 .use_pairwise_terminals
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             let ev_a = actual.train(60);
@@ -4447,7 +4451,7 @@ mod terminal_regression_tests {
             for p in 0..2 {
                 close(ev_a[p], ev_b[p]);
             }
-            for id in 0..actual.tree.num_decision_nodes {
+            for id in 0..actual.game.tree.num_decision_nodes {
                 for (a, b) in actual
                     .average_strategy(id)
                     .iter()

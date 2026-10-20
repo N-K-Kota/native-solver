@@ -49,6 +49,7 @@ pub struct StrategyQuality {
 
 /// Invalid or unsupported reference-evaluation input.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QualityError {
     /// The initial board has duplicate or out-of-range cards, or an
     /// unsupported length.

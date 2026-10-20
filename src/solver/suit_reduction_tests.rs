@@ -37,7 +37,7 @@ fn expand(
         ) => {
             assert_eq!(player, rp);
             assert_eq!(format!("{actions:?}"), format!("{ra:?}"));
-            let combos = trainer.combos(player.index());
+            let combos = trainer.game.combos(*player);
             let policy = get(*rid);
             let indices: Vec<_> = combos
                 .iter()
@@ -117,7 +117,7 @@ fn projected(
     let mut policies = Policies::new();
     let composed = expand(
         full,
-        trainer.tree(),
+        trainer.game.tree(),
         trainer,
         std::array::from_fn(|i| i as u8),
         &mut policies,
@@ -213,10 +213,10 @@ fn current(t: &Trainer, id: usize) -> Vec<Vec<f64>> {
 /// Diagnostics compare the same public history and concrete, board-live hand.
 /// Never require two independently learned profiles to be numerically equal.
 fn trace(full: &Trainer, reduced: &Trainer) {
-    let (regrets, _) = projected(full.tree(), reduced, |id| {
+    let (regrets, _) = projected(full.game.tree(), reduced, |id| {
         reduced.node_data[id].lock().unwrap().regret_sum.clone()
     });
-    let (strategy, _) = projected(full.tree(), reduced, |id| current(reduced, id));
+    let (strategy, _) = projected(full.game.tree(), reduced, |id| current(reduced, id));
     let mut max_regret: f64 = 0.0;
     let mut max_policy = (0.0, 0, 0);
     for (&id, rows) in &regrets {
@@ -228,10 +228,10 @@ fn trace(full: &Trainer, reduced: &Trainer) {
         }
         drop(own);
         let own = current(full, id);
-        let (player, board) = &full.node_meta[id];
+        let (player, board) = &full.game.node_meta[id];
         for (a, b) in own.iter().zip(&strategy[&id]) {
             for (i, (x, y)) in a.iter().zip(b).enumerate() {
-                let [h1, h2] = full.combos[*player][i].cards;
+                let [h1, h2] = full.game.combos[*player][i].cards;
                 if !board.contains(&h1) && !board.contains(&h2) && (x - y).abs() > max_policy.0 {
                     max_policy = ((x - y).abs(), id, i);
                 }
@@ -240,7 +240,7 @@ fn trace(full: &Trainer, reduced: &Trainer) {
     }
     let (gap, id, i) = max_policy;
     println!("trace iterations={} regret_gap={max_regret:.3e} current_gap={gap} node={id} hand={i} board={:?} full_regrets={:?} reduced_regrets={:?}",
-        full.iterations_completed(),full.node_board(id),full.node_data[id].lock().unwrap().regret_sum.iter().map(|r|r[i]).collect::<Vec<_>>(),regrets[&id].iter().map(|r|r[i]).collect::<Vec<_>>());
+        full.iterations_completed(),full.game.node_board(id),full.node_data[id].lock().unwrap().regret_sum.iter().map(|r|r[i]).collect::<Vec<_>>(),regrets[&id].iter().map(|r|r[i]).collect::<Vec<_>>());
     println!(
         "trajectory full={} reduced={}",
         full.exploitability().total,
@@ -386,11 +386,11 @@ fn matrix_flop_medium_fixed_profiles() {
 
 fn assert_policy_symmetry(t: &Trainer) {
     let mut compared = 0;
-    for (id, (player, board)) in t.node_meta.iter().enumerate() {
+    for (id, (player, board)) in t.game.node_meta.iter().enumerate() {
         let free: Vec<_> = (0..4)
             .filter(|s| !board.iter().any(|&c| suit(c) == *s))
             .collect();
-        let (_, buckets) = t.combo_buckets(*player, board);
+        let (_, buckets) = t.game.combo_buckets(*player, board);
         let current = current(t, id);
         let average = t.average_strategy(id);
         for &a in &free {
@@ -403,10 +403,10 @@ fn assert_policy_symmetry(t: &Trainer) {
                     &Combo {
                         cards: [h1, h2], ..
                     },
-                ) in t.combos[*player].iter().enumerate()
+                ) in t.game.combos[*player].iter().enumerate()
                 {
                     let mapped = normalize_pair(swap_suit(h1, a, b), swap_suit(h2, a, b));
-                    let j = t.combos[*player]
+                    let j = t.game.combos[*player]
                         .iter()
                         .position(|&Combo { cards: [c, d], .. }| normalize_pair(c, d) == mapped)
                         .unwrap();
@@ -423,7 +423,7 @@ fn assert_policy_symmetry(t: &Trainer) {
                 }
             }
         }
-        for i in 0..t.combos[*player].len() {
+        for i in 0..t.game.combos[*player].len() {
             assert!((average.iter().map(|r| r[i]).sum::<f64>() - 1.0).abs() < 1e-12);
             assert!((current.iter().map(|r| r[buckets[i]]).sum::<f64>() - 1.0).abs() < 1e-12);
         }

@@ -28,7 +28,7 @@ the first player's strategy for each combo:
 ```rust
 use native_solver::{
     build_tree, card_from_str, card_to_string, set_from_cards, Action, Chips, GameConfig, Node,
-    Range, Trainer, TrainerOptions,
+    Player, Range, Trainer, TrainerOptions,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unreachable!("a river tree with chips behind starts with a decision");
     };
     let strategy = trainer.average_strategy(0);
-    for (i, combo) in trainer.game().combos(0).iter().enumerate() {
+    for (i, combo) in trainer.game().combos(Player::Oop).iter().enumerate() {
         let [a, b] = combo.cards;
         print!("{}{}", card_to_string(a), card_to_string(b));
         for (action, row) in actions.iter().zip(&strategy) {
@@ -85,10 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 The output starts like this:
 
 ```text
-exploitability: 0.294 chips
-JcTc  check 97%  bet 50 1%  bet 100 2%
-JdTd  check 97%  bet 50 1%  bet 100 2%
-JsTs  check 2%  bet 50 2%  bet 100 96%
+exploitability: 0.060 chips
+JcTc  check 100%  bet 50 0%  bet 100 0%
+JdTd  check 100%  bet 50 0%  bet 100 0%
+JsTs  check 0%  bet 50 0%  bet 100 100%
 ...
 ```
 
