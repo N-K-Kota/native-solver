@@ -203,10 +203,13 @@ impl Range {
 
     /// Expands the range into combos, dropping any that use a card in `dead`.
     ///
-    /// Pass the board (and any other known cards) as `dead`. Combos are ordered by
-    /// their lower card, then their higher card, so the order, and every solver
-    /// result that sums over it, is the same on every run however the range was
-    /// built.
+    /// Pass the board as `dead`. Removing other cards too breaks suit
+    /// symmetry, which [`Trainer::new`](crate::Trainer::new) requires with
+    /// suit isomorphism or flop and turn buckets.
+    ///
+    /// Combos are ordered by their lower card, then their higher card, so the
+    /// order, and every solver result that sums over it, is the same on every
+    /// run however the range was built.
     pub fn combos(&self, dead: CardSet) -> Vec<Combo> {
         let mut out = Vec::new();
         for (hand, &weight) in &self.weights {

@@ -77,7 +77,7 @@ impl GameConfig {
     /// Cards of the same rank whose suits are both absent from the board are
     /// interchangeable, so the tree recurses once per such class and the trainer
     /// derives the other members' values by relabeling suits. Results match the
-    /// unreduced tree (see [the conventions](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/conventions.md)). Off by
+    /// unreduced tree (see [the conventions](crate::conventions)). Off by
     /// default.
     pub fn with_suit_isomorphism(mut self, suit_isomorphism: bool) -> GameConfig {
         self.suit_isomorphism = suit_isomorphism;

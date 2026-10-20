@@ -503,7 +503,7 @@ pub struct SolverGame {
     tree: super::tree::Tree,
     initial_board: Vec<Card>,
     combos: [Vec<Combo>; 2],
-    /// [`evaluate_7`] scores for every complete (5-card) board reachable via
+    /// [`evaluate_7`](crate::evaluate_7) scores for every complete (5-card) board reachable via
     /// a `Chance` node, precomputed once so `train()` doesn't recompute
     /// hand strengths for the same board on every iteration.
     board_eval_cache: HashMap<Vec<Card>, [Vec<u32>; 2]>,
@@ -520,7 +520,7 @@ pub struct SolverGame {
     /// abstraction" section. `CardAbstraction::default()` never buckets.
     abstraction: CardAbstraction,
     /// Per board (any length reachable by a Decision node — flop/turn use
-    /// `avg_score`, river uses the real [`evaluate_7`] score), per player:
+    /// `avg_score`, river uses the real [`evaluate_7`](crate::evaluate_7) score), per player:
     /// combo index -> bucket index. Only populated for streets
     /// `abstraction` actually buckets.
     bucket_maps: HashMap<Vec<Card>, [Vec<usize>; 2]>,
@@ -585,7 +585,7 @@ pub struct Evaluation {
     /// Root `[OOP, IP]` raw range-weighted values, not EVs.
     ///
     /// They are zero-sum like [`Trainer::train`]'s return, but under the evaluated
-    /// policy. See [the conventions](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/conventions.md) for the
+    /// policy. See [the conventions](crate::conventions) for the
     /// normalization.
     pub root_values: [f64; 2],
 }
@@ -663,9 +663,11 @@ impl Trainer {
     /// trainer's lifetime; an alternating iteration is an OOP pass followed by an
     /// IP pass), and per-street card abstraction.
     ///
-    /// Trees with grouped chance cards (suit isomorphism) need ranges closed under
-    /// every suit swap that fixes the board, with equal weights for swapped combos.
-    /// Ranges from [`Range::combos`](crate::Range::combos) satisfy this.
+    /// Trees with grouped chance cards (suit isomorphism) need ranges closed
+    /// under every suit swap that fixes the board, with equal weights for
+    /// swapped combos; flop and turn buckets need the swapped combos to exist.
+    /// Ranges from [`Range::combos`](crate::Range::combos) satisfy both when
+    /// `dead` is exactly the tree's board.
     ///
     /// # Errors
     /// Returns a [`TrainerError`] if the tree's board is illegal, the tree
@@ -1190,7 +1192,7 @@ impl Trainer {
     /// (`members[0]`) is actually recursed into. Every other member's
     /// counterfactual values are derived from the representative's by
     /// `relabel_cfv` — a swap of the two suits involved is a symmetry of
-    /// the game (it doesn't change tree structure or [`evaluate_7`]
+    /// the game (it doesn't change tree structure or [`evaluate_7`](crate::evaluate_7)
     /// outcomes), so member `card`'s cfv for combo `j` equals the
     /// representative's cfv for the combo obtained by applying that same
     /// suit swap to combo `j`'s two cards. With isomorphism disabled every
@@ -1950,7 +1952,7 @@ impl SolverGame {
     /// Raw showdown win probability for each of `player`'s combos against
     /// the opponent's `reach`-weighted range at this node — only valid
     /// (and only ever called) once `board_eval` is a complete board's real
-    /// [`evaluate_7`] scores. Excludes opponent combos blocked by the hero's
+    /// [`evaluate_7`](crate::evaluate_7) scores. Excludes opponent combos blocked by the hero's
     /// own two cards *and* ones that physically conflict with the board
     /// (same exclusion `showdown_cfv` uses — without it, a phantom
     /// opponent combo could still be assigned nonzero weight here even
@@ -2192,7 +2194,7 @@ fn swap_suit(card: Card, suit_a: u8, suit_b: u8) -> Card {
     Card(card.rank() * 4 + new_suit)
 }
 
-/// [`evaluate_7`] scores for every combo, if `board` is a complete 5-card
+/// [`evaluate_7`](crate::evaluate_7) scores for every combo, if `board` is a complete 5-card
 /// board — otherwise empty (no [`Terminal::Showdown`] is ever reachable with
 /// an incomplete board, so it's never read in that case).
 ///
@@ -2202,7 +2204,7 @@ fn swap_suit(card: Card, suit_a: u8, suit_b: u8) -> Card {
 /// combo from every aggregate sum before it reaches the root (that's the
 /// whole point of the "N-4" private-deal normalization this module's doc comment
 /// describes), so its score here is never actually read. Skipping
-/// [`evaluate_7`] for it (sentinel `0`) avoids feeding it a 7-card hand that
+/// [`evaluate_7`](crate::evaluate_7) for it (sentinel `0`) avoids feeding it a 7-card hand that
 /// can't occur in reality — e.g. a pocket-pair combo whose two ranks-match
 /// a rank that also completes trips/quads on the board, which pushes one
 /// rank to 5 "occurrences" among the 7 cards, a pattern `eval::evaluate_5`'s
@@ -2233,7 +2235,7 @@ fn eval_combos_if_complete(combos: &[Vec<Combo>; 2], board: &[Card]) -> [Vec<u32
 }
 
 /// Walks every `Chance` branch once, filling `cache` with the
-/// [`evaluate_7`] scores for each complete board reachable from `board`.
+/// [`evaluate_7`](crate::evaluate_7) scores for each complete board reachable from `board`.
 fn precompute_board_eval(
     node: &Node,
     board: &[Card],
@@ -2295,7 +2297,7 @@ fn collect_reachable_boards(
 }
 
 /// Splits combos into `num_buckets` contiguous, roughly-equal-sized groups
-/// by score percentile (river: real [`evaluate_7`] scores; flop/turn:
+/// by score percentile (river: real [`evaluate_7`](crate::evaluate_7) scores; flop/turn:
 /// `avg_score`'s future-score expectation) — sorting by score and cutting
 /// every `n / num_buckets`-th combo keeps the assignment monotonic (a
 /// higher-scoring combo never lands in a lower bucket than a
@@ -2328,7 +2330,7 @@ fn compute_percentile_buckets(scores: &[f64], num_buckets: usize) -> Vec<usize> 
     bucket_of
 }
 
-/// Each combo's expected [`evaluate_7`] score from `board` through to the
+/// Each combo's expected [`evaluate_7`](crate::evaluate_7) score from `board` through to the
 /// river, averaged over future streets — the proxy [`CardAbstraction`]'s
 /// flop/turn bucketing ranks combos by, since (unlike the river) their
 /// hand isn't final yet. This is coarser than true equity: it's a plain
@@ -2336,7 +2338,7 @@ fn compute_percentile_buckets(scores: &[f64], num_buckets: usize) -> Vec<usize> 
 /// an opponent range, so it doesn't capture *how* a hand realizes its
 /// value (e.g. a made hand with no more equity to gain and a drawing hand
 /// with the same average score play very differently in reality) — but it
-/// reuses the exact [`evaluate_7`] machinery already computed for real
+/// reuses the exact [`evaluate_7`](crate::evaluate_7) machinery already computed for real
 /// showdowns, needs no separate equity engine, and preserves the right
 /// ordering for the common case (stronger hands now tend to stay stronger).
 ///
@@ -2346,7 +2348,7 @@ fn compute_percentile_buckets(scores: &[f64], num_buckets: usize) -> Vec<usize> 
 /// always a valid equivalence, so this one-time precomputation is cheaper
 /// this way, and when the tree *was* isomorphism-reduced this also means
 /// every board it visits at the base case is already in `board_eval_cache`
-/// (zero redundant [`evaluate_7`] calls beyond what training needs anyway).
+/// (zero redundant [`evaluate_7`](crate::evaluate_7) calls beyond what training needs anyway).
 fn avg_score(
     board: &[Card],
     combos: &[Vec<Combo>; 2],

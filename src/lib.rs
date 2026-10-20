@@ -45,9 +45,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! See [the conventions](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/conventions.md) for units and value
-//! normalization, and [the algorithms](https://github.com/N-K-Kota/native-solver/blob/v0.1.0/docs/algorithms.md) for the update
-//! rules.
+//! See [`conventions`] for units and value normalization, and
+//! [`algorithms`] for the update rules.
 
 #![warn(missing_docs)]
 
@@ -64,6 +63,12 @@ pub mod eval;
 mod games;
 pub mod range;
 pub mod solver;
+
+#[doc = include_str!("../docs/conventions.md")]
+pub mod conventions {}
+
+#[doc = include_str!("../docs/algorithms.md")]
+pub mod algorithms {}
 
 pub use card::{Card, CardParseError, CardSet};
 pub use eval::{evaluate_5, evaluate_7, HandCategory, HandStrength};
