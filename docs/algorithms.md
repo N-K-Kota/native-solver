@@ -73,3 +73,6 @@ snapshot. The restored policy reads bit-identically.
 `Range::combos` returns combos in a fixed order, and the trainer keeps that
 order. Results depend on the order of floating-point operations: reordering
 combos or swapping the two cards inside a combo can change the last bits.
+The thread count does not: each decision node is updated once per pass, by
+the one traversal path that reaches it, and parallel child values are
+combined in a fixed order.
