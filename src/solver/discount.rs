@@ -14,7 +14,7 @@
 ///
 /// The player-update order is chosen separately with [`UpdateSchedule`].
 /// [`Dcfr`](Self::Dcfr), the default, usually converges fastest.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SolverAlgorithm {
     /// Vanilla regret matching and uniformly weighted average strategies.
@@ -32,7 +32,7 @@ pub enum SolverAlgorithm {
 }
 
 /// Player update order, independent of regret discounting and averaging.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum UpdateSchedule {
     /// Both players update against the same pre-iteration strategy profile.
     #[default]

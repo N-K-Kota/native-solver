@@ -6,7 +6,7 @@ use native_solver::solver::{
     build_tree_bounded, Action, GameConfig, Node, Player, SolverAlgorithm, Trainer, UpdateSchedule,
 };
 use native_solver::{
-    card::{card_from_str, set_from_cards},
+    card::{Card, CardSet},
     range::Range,
 };
 
@@ -129,16 +129,11 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|c| card_from_str(std::str::from_utf8(c).unwrap()).unwrap())
+                    .map(|c| (std::str::from_utf8(c).unwrap()).parse::<Card>().unwrap())
                     .collect();
-                let cfg = GameConfig {
-                    board: board.clone(),
-                    pot: Chips::whole(100),
-                    effective_stack: Chips::whole(100),
-                    bet_sizes: vec![1.0],
-                    max_raises: 0,
-                    suit_isomorphism: iso,
-                };
+                let cfg = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(100))
+                    .with_bet_sizes([1.0])
+                    .with_suit_isomorphism(iso);
                 let tree = build_tree_bounded(&cfg, 20_000).unwrap();
                 let mut legacy = build_tree_bounded(&cfg, 20_000).unwrap();
                 restore_forced_checks(&mut legacy.root);
@@ -153,10 +148,10 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                 let combos = [
                     Range::parse("AA:0.5,KK")
                         .unwrap()
-                        .combos(set_from_cards(&board)),
+                        .combos(CardSet::from_cards(&board)),
                     Range::parse("QQ,JJ:0.25")
                         .unwrap()
-                        .combos(set_from_cards(&board)),
+                        .combos(CardSet::from_cards(&board)),
                 ];
                 let mut new = Trainer::new(
                     tree,
@@ -204,16 +199,14 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
 
 #[test]
 fn uncalled_all_in_still_requires_opponent_fold_or_call_and_ids_are_dense() {
-    let cfg = GameConfig {
-        board: ["Ks", "7d", "2c", "9h"]
-            .map(|c| card_from_str(c).unwrap())
+    let cfg = GameConfig::new(
+        ["Ks", "7d", "2c", "9h"]
+            .map(|c| c.parse::<Card>().unwrap())
             .to_vec(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(100),
-        bet_sizes: vec![1.0],
-        max_raises: 0,
-        suit_isomorphism: false,
-    };
+        Chips::whole(100),
+        Chips::whole(100),
+    )
+    .with_bet_sizes([1.0]);
     let tree = build_tree_bounded(&cfg, 196).unwrap();
     assert_eq!(tree.num_decision_nodes, 196);
     assert!(build_tree_bounded(&cfg, 195).is_err());

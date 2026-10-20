@@ -2,9 +2,8 @@
 use native_solver::solver::Chips;
 use native_solver::solver::TrainerOptions;
 use native_solver::{
-    card_from_str,
     solver::{build_tree, GameConfig, SolverAlgorithm, Trainer, UpdateSchedule},
-    Combo,
+    Card, Combo,
 };
 
 type Table = [[[f64; 2]; 3]; 4];
@@ -87,15 +86,13 @@ fn alternating_dcfr_matches_independent_scalar_history_recurrence() {
         .build()
         .unwrap();
     pool.install(|| {
-        let card = |s| card_from_str(s).unwrap();
-        let cfg = GameConfig {
-            board: ["2h", "3c", "7d", "8h", "9c"].map(card).to_vec(),
-            pot: Chips::whole(2),
-            effective_stack: Chips::whole(1),
-            bet_sizes: vec![0.5],
-            max_raises: 0,
-            suit_isomorphism: false,
-        };
+        let card = |s: &str| s.parse::<Card>().unwrap();
+        let cfg = GameConfig::new(
+            ["2h", "3c", "7d", "8h", "9c"].map(card).to_vec(),
+            Chips::whole(2),
+            Chips::whole(1),
+        )
+        .with_bet_sizes([0.5]);
         let combos = vec![
             Combo::new(card("Js"), card("Jd"), 1.0),
             Combo::new(card("Qs"), card("Qd"), 1.0),
@@ -173,12 +170,12 @@ fn alternating_dcfr_matches_independent_scalar_history_recurrence() {
 
 #[test]
 fn alternating_suit_reduction_matches_full_runouts_and_parallel_execution() {
-    use native_solver::{range::Range, set_from_cards};
+    use native_solver::{range::Range, Card, CardSet};
     let board = ["2c", "7c", "9d", "Jd"]
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .to_vec();
     let combos = ["AA:0.5,QQ", "KK,TT:0.25"]
-        .map(|s| Range::parse(s).unwrap().combos(set_from_cards(&board)));
+        .map(|s| Range::parse(s).unwrap().combos(CardSet::from_cards(&board)));
     let mut reference: Option<(f64, Vec<Vec<f64>>)> = None;
     let mut full_nodes = 0;
     for (threads, iso) in [(1, false), (1, true), (2, true)] {
@@ -187,14 +184,11 @@ fn alternating_suit_reduction_matches_full_runouts_and_parallel_execution() {
             .build()
             .unwrap();
         pool.install(|| {
-            let tree = build_tree(&GameConfig {
-                board: board.clone(),
-                pot: Chips::whole(100),
-                effective_stack: Chips::whole(100),
-                bet_sizes: vec![1.0],
-                max_raises: 0,
-                suit_isomorphism: iso,
-            })
+            let tree = build_tree(
+                &GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(100))
+                    .with_bet_sizes([1.0])
+                    .with_suit_isomorphism(iso),
+            )
             .unwrap();
             if iso {
                 assert!(tree.num_decision_nodes < full_nodes);

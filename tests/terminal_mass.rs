@@ -1,16 +1,20 @@
 //! Public-API regressions for blocker subtraction near zero compatible reach.
 use native_solver::solver::{Action, Node, Player, Terminal, Trainer, TrainerError, Tree};
 use native_solver::solver::{SolverAlgorithm, TrainerOptions};
-use native_solver::{card_from_str, evaluate_7, Combo};
+use native_solver::{evaluate_7, Card, Combo};
 
 fn combo(a: &str, b: &str, weight: f64) -> Combo {
-    Combo::new(card_from_str(a).unwrap(), card_from_str(b).unwrap(), weight)
+    Combo::new(
+        a.parse::<Card>().unwrap(),
+        b.parse::<Card>().unwrap(),
+        weight,
+    )
 }
 
 fn trainer(compatible_weight: Option<f64>, fold: bool) -> Result<Trainer, TrainerError> {
     let board: Vec<_> = ["2c", "7d", "9h", "Js", "Qd"]
         .iter()
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .collect();
     let hero = combo("Ac", "Ad", 1.0);
     let mut opponents = vec![
@@ -111,7 +115,7 @@ fn tiny_compatible_reach_survives_larger_blocked_reach() {
 fn highly_unequal_showdown_investments_preserve_small_payouts() {
     let board: Vec<_> = ["2c", "7d", "9h", "Js", "Qd"]
         .iter()
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .collect();
     let aces = combo("Ac", "Ad", 1.0);
     let kings = combo("Kh", "Kd", 1.0);

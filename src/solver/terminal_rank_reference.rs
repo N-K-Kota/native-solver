@@ -10,7 +10,7 @@ impl TerminalIndex {
         reach: &[f64],
         scores: &[Vec<u32>; 2],
         order: &BoardOrder,
-        board: CardSet,
+        board: u64,
         invested: &[f64; 2],
     ) -> Vec<f64> {
         let opp = 1 - player;
@@ -105,7 +105,7 @@ fn cached_rank_bounds_preserve_ties_blockers_and_cancellation_fallback() {
     // Deliberately unsorted and repeated/reversed pairs; scores are tied and
     // identical for identical pairs. A second range can be empty.
     let full: Vec<Combo> = (0..12)
-        .flat_map(|a| (a + 1..13).map(move |b| Combo::new(a, b, 1.0)))
+        .flat_map(|a| (a + 1..13).map(move |b| Combo::new(Card(a), Card(b), 1.0)))
         .collect();
     let mut sparse: Vec<_> = full.iter().step_by(3).rev().copied().collect();
     sparse.push(Combo::new(sparse[2].cards[1], sparse[2].cards[0], 1.0));
@@ -123,7 +123,7 @@ fn cached_rank_bounds_preserve_ties_blockers_and_cancellation_fallback() {
                             if all_tied {
                                 7
                             } else {
-                                ((a as u32 + b as u32) % 5) + 1
+                                ((a.0 as u32 + b.0 as u32) % 5) + 1
                             }
                         })
                         .collect()

@@ -1,6 +1,6 @@
-use native_solver::card_from_str;
 use native_solver::solver::Chips;
 use native_solver::solver::{build_tree, Action, GameConfig, Node};
+use native_solver::Card;
 
 fn action<'a>(node: &'a Node, name: &str) -> &'a Node {
     let Node::Decision {
@@ -25,23 +25,21 @@ fn chance<'a>(node: &'a Node, card: &str) -> &'a Node {
     };
     &children
         .iter()
-        .find(|(cards, _)| cards.contains(&card_from_str(card).unwrap()))
+        .find(|(cards, _)| cards.contains(&card.parse::<Card>().unwrap()))
         .unwrap()
         .1
 }
 #[test]
 fn callers_spend_their_remaining_stack_before_next_street() {
-    let cfg = GameConfig {
-        board: ["2c", "7d", "Jh"]
+    let cfg = GameConfig::new(
+        ["2c", "7d", "Jh"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(100),
-        bet_sizes: vec![0.5],
-        max_raises: 0,
-        suit_isomorphism: false,
-    };
+        Chips::whole(100),
+        Chips::whole(100),
+    )
+    .with_bet_sizes([0.5]);
     let tree = build_tree(&cfg).unwrap();
     let ip_flop = action(&tree.root, "bet50");
     let turn = chance(action(ip_flop, "call"), "Qh");
@@ -81,20 +79,19 @@ fn no_terminal_exceeds_the_effective_stack_after_calls_and_raises() {
         }
     }
     for raises in [0, 1, 2] {
-        let cfg = GameConfig {
-            board: ["2c", "7d", "Jh", "Qs"]
+        let cfg = GameConfig::new(
+            ["2c", "7d", "Jh", "Qs"]
                 .iter()
-                .map(|s| card_from_str(s).unwrap())
+                .map(|s| s.parse::<Card>().unwrap())
                 .collect(),
-            pot: Chips::whole(100),
-            effective_stack: Chips::whole(80),
-            bet_sizes: vec![0.25, 0.5, 1.0],
-            max_raises: raises,
-            suit_isomorphism: false,
-        };
+            Chips::whole(100),
+            Chips::whole(80),
+        )
+        .with_bet_sizes([0.25, 0.5, 1.0])
+        .with_max_raises(raises);
         check(
             &build_tree(&cfg).unwrap().root,
-            cfg.pot.to_f64() / 2.0 + cfg.effective_stack.to_f64(),
+            cfg.pot().to_f64() / 2.0 + cfg.effective_stack().to_f64(),
         );
     }
 }

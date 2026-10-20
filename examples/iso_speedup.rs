@@ -2,7 +2,7 @@
 //! just a measurement script run manually during development). Run with:
 //!   cargo run --release --example iso_speedup
 
-use native_solver::card::{card_from_str, set_from_cards};
+use native_solver::card::{Card, CardSet};
 use native_solver::range::Range;
 use native_solver::solver::Chips;
 use native_solver::solver::{build_tree, GameConfig, Trainer};
@@ -15,20 +15,16 @@ fn run(suit_isomorphism: bool, iterations: u32) -> (usize, std::time::Duration, 
     // unreduced tree stays small enough to actually finish).
     let board: Vec<_> = ["2c", "7c", "9c", "Kc"]
         .iter()
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .collect();
-    let dead = set_from_cards(&board);
+    let dead = CardSet::from_cards(&board);
     let oop_combos = Range::parse("QQ,JJ,TT,99,AQo,KQo").unwrap().combos(dead);
     let ip_combos = Range::parse("88,77,66,KTo,QTo").unwrap().combos(dead);
 
-    let cfg = GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(200),
-        bet_sizes: vec![0.5, 1.0],
-        max_raises: 1,
-        suit_isomorphism,
-    };
+    let cfg = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(200))
+        .with_bet_sizes([0.5, 1.0])
+        .with_max_raises(1)
+        .with_suit_isomorphism(suit_isomorphism);
     let tree = build_tree(&cfg).unwrap();
     let num_decision_nodes = tree.num_decision_nodes;
     let mut trainer = Trainer::new(

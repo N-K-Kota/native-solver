@@ -11,7 +11,7 @@
 //! A fixed-iteration run is explicitly selected with --fixed-iterations; it does
 //! not claim convergence. Otherwise hitting the cap without the target exits 2.
 
-use native_solver::card::{card_from_str, set_contains, set_from_cards, Card};
+use native_solver::card::{Card, CardSet};
 use native_solver::range::{all_canonical_hands, Combo, Range};
 use native_solver::solver::quality::ReferenceEvaluator;
 use native_solver::solver::Chips;
@@ -203,7 +203,7 @@ struct ResultRow {
 fn sorted_combos(spec: &str, board: &[Card]) -> Result<Vec<Combo>, String> {
     let mut combos = Range::parse(spec)
         .map_err(|e| e.to_string())?
-        .combos(set_from_cards(board));
+        .combos(CardSet::from_cards(board));
     // Fix each pair's orientation as well as the combo order so reductions
     // are repeatable.
     for combo in &mut combos {
@@ -299,7 +299,7 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
     };
     let board: Vec<Card> = board_text
         .split(',')
-        .map(|c| card_from_str(c).expect("valid fixture board"))
+        .map(|c| c.parse::<Card>().expect("valid fixture board"))
         .collect();
     let combos = [
         sorted_combos(&range_specs[0], &board)?,
@@ -333,14 +333,13 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
     if !joint_mass.is_finite() || joint_mass <= 0.0 {
         return Err("invalid compatible initial range mass".into());
     }
-    let cfg = GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::from_f64(effective_stack).expect("workload stacks are whole chips"),
-        bet_sizes: bet_sizes.clone(),
-        max_raises,
-        suit_isomorphism: false,
-    };
+    let cfg = GameConfig::new(
+        board.clone(),
+        Chips::whole(100),
+        Chips::from_f64(effective_stack).expect("workload stacks are whole chips"),
+    )
+    .with_bet_sizes(bet_sizes.clone())
+    .with_max_raises(max_raises);
     let tree = build_tree_bounded(&cfg, MAX_DECISION_NODES).map_err(|e| e.to_string())?;
     let decision_nodes = tree.num_decision_nodes;
     // Pair count alone is insufficient on a flop: reject a large independent
@@ -420,12 +419,12 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
     let mut players = vec![0; decision_nodes];
     collect_players(trainer.game().tree(), &mut players);
     for (node_id, &player) in players.iter().enumerate() {
-        let board_mask = set_from_cards(trainer.game().node_board(node_id));
+        let board_mask = CardSet::from_cards(trainer.game().node_board(node_id));
         let live: Vec<bool> = trainer
             .game()
             .combos(Player::ALL[player])
             .iter()
-            .map(|c| !set_contains(board_mask, c.cards[0]) && !set_contains(board_mask, c.cards[1]))
+            .map(|c| !board_mask.contains(c.cards[0]) && !board_mask.contains(c.cards[1]))
             .collect();
         let strategy = trainer.average_strategy(node_id);
         for (action, row) in strategy.iter().enumerate() {
@@ -491,7 +490,7 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
         let start = Instant::now();
         let evaluator = ReferenceEvaluator::new(
             trainer.game().tree(),
-            &cfg.board,
+            cfg.board(),
             Player::ALL.map(|player| trainer.game().combos(player)),
         )
         .map_err(|e| e.to_string())?;
@@ -707,18 +706,12 @@ mod tests {
     fn dry_flop_independent_audit_fits_work_guard() {
         let board: Vec<_> = ["Ks", "7d", "2c"]
             .iter()
-            .map(|c| card_from_str(c).unwrap())
+            .map(|c| c.parse::<Card>().unwrap())
             .collect();
         let oop = sorted_combos("AA,AKs", &board).unwrap();
         let ip = sorted_combos("QQ,KQs", &board).unwrap();
-        let cfg = GameConfig {
-            board,
-            pot: Chips::whole(100),
-            effective_stack: Chips::whole(100),
-            bet_sizes: vec![0.5],
-            max_raises: 0,
-            suit_isomorphism: false,
-        };
+        let cfg =
+            GameConfig::new(board, Chips::whole(100), Chips::whole(100)).with_bet_sizes([0.5]);
         let tree = build_tree_bounded(&cfg, MAX_DECISION_NODES).unwrap();
         assert_eq!([oop.len(), ip.len()], [9, 9]);
         // Four decisions per live street (OOP, IP after check, and the

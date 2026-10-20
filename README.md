@@ -27,29 +27,24 @@ the first player's strategy for each combo:
 
 ```rust
 use native_solver::{
-    build_tree, card_from_str, card_to_string, set_from_cards, Action, Chips, GameConfig, Node,
-    Player, Range, Trainer, TrainerOptions,
+    build_tree, Action, Card, CardSet, Chips, GameConfig, Node, Player, Range, Trainer,
+    TrainerOptions,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let board = ["Ks", "Th", "7s", "4d", "2s"]
         .iter()
-        .map(|card| card_from_str(card))
-        .collect::<Result<Vec<_>, _>>()?;
-    let config = GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(100),
-        bet_sizes: vec![0.5, 1.0],
-        max_raises: 1,
-        suit_isomorphism: false,
-    };
+        .map(|card| card.parse())
+        .collect::<Result<Vec<Card>, _>>()?;
+    let config = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(100))
+        .with_bet_sizes([0.5, 1.0])
+        .with_max_raises(1);
 
     // Two different ranks need an `s` (suited) or `o` (offsuit) marker.
     // Passing the board as dead cards removes combos that share a card with it.
-    let dead = set_from_cards(&board);
-    let oop = Range::parse("AA,KK,KQs,QJs,JTs:0.5,AQo")?.combos(dead);
-    let ip = Range::parse("AKs,AKo,KJs,TT,99,A5s:0.5")?.combos(dead);
+    let dead = CardSet::from_cards(&board);
+    let oop = "AA,KK,KQs,QJs,JTs:0.5,AQo".parse::<Range>()?.combos(dead);
+    let ip = "AKs,AKo,KJs,TT,99,A5s:0.5".parse::<Range>()?.combos(dead);
 
     // Both steps validate their input and return an error instead of panicking.
     let tree = build_tree(&config)?;
@@ -67,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let strategy = trainer.average_strategy(0);
     for (i, combo) in trainer.game().combos(Player::Oop).iter().enumerate() {
         let [a, b] = combo.cards;
-        print!("{}{}", card_to_string(a), card_to_string(b));
+        print!("{a}{b}");
         for (action, row) in actions.iter().zip(&strategy) {
             let label = match action {
                 Action::Check => "check".to_string(),

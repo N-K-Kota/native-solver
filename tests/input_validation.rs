@@ -4,10 +4,10 @@ use native_solver::solver::{
     build_tree, build_tree_bounded, Action, BoardError, CardAbstraction, Chips, GameConfig, Node,
     Player, Terminal, Trainer, TrainerError, TrainerOptions, Tree, TreeError,
 };
-use native_solver::{card_from_str, set_from_cards, Card, Combo, Range};
+use native_solver::{Card, CardSet, Combo, Range};
 
 fn board(names: &[&str]) -> Vec<Card> {
-    names.iter().map(|s| card_from_str(s).unwrap()).collect()
+    names.iter().map(|s| s.parse::<Card>().unwrap()).collect()
 }
 
 fn river() -> Vec<Card> {
@@ -15,18 +15,17 @@ fn river() -> Vec<Card> {
 }
 
 fn config(board: Vec<Card>) -> GameConfig {
-    GameConfig {
-        board,
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(100),
-        bet_sizes: vec![0.5, 1.0],
-        max_raises: 1,
-        suit_isomorphism: false,
-    }
+    config_with(board, Chips::whole(100), Chips::whole(100))
+}
+
+fn config_with(board: Vec<Card>, pot: Chips, effective_stack: Chips) -> GameConfig {
+    GameConfig::new(board, pot, effective_stack)
+        .with_bet_sizes([0.5, 1.0])
+        .with_max_raises(1)
 }
 
 fn combos(oop: &str, ip: &str, board: &[Card]) -> [Vec<Combo>; 2] {
-    let dead = set_from_cards(board);
+    let dead = CardSet::from_cards(board);
     [
         Range::parse(oop).unwrap().combos(dead),
         Range::parse(ip).unwrap().combos(dead),
@@ -34,7 +33,11 @@ fn combos(oop: &str, ip: &str, board: &[Card]) -> [Vec<Combo>; 2] {
 }
 
 fn combo(a: &str, b: &str, weight: f64) -> Combo {
-    Combo::new(card_from_str(a).unwrap(), card_from_str(b).unwrap(), weight)
+    Combo::new(
+        a.parse::<Card>().unwrap(),
+        b.parse::<Card>().unwrap(),
+        weight,
+    )
 }
 
 /// `Trainer::new` on a river tree for `river()` with the given combos.
@@ -61,11 +64,10 @@ fn build_tree_rejects_illegal_boards() {
             board(&["Ks", "Th", "7s", "4d", "2s", "3c"]),
             BoardError::WrongSize { len: 6 },
         ),
-        (vec![0, 1, 52], BoardError::InvalidCard { card: 52 }),
         (
             board(&["Ks", "Th", "Ks"]),
             BoardError::DuplicateCard {
-                card: card_from_str("Ks").unwrap(),
+                card: "Ks".parse::<Card>().unwrap(),
             },
         ),
     ];
@@ -78,24 +80,15 @@ fn build_tree_rejects_illegal_boards() {
 #[test]
 fn build_tree_rejects_illegal_chip_amounts_and_bet_sizes() {
     for pot in [Chips::ZERO, Chips::whole(-10)] {
-        let cfg = GameConfig {
-            pot,
-            ..config(river())
-        };
+        let cfg = config_with(river(), pot, Chips::whole(100));
         assert_eq!(build_tree(&cfg).err(), Some(TreeError::NonPositivePot));
     }
 
-    let cfg = GameConfig {
-        effective_stack: Chips::whole(-1),
-        ..config(river())
-    };
+    let cfg = config_with(river(), Chips::whole(100), Chips::whole(-1));
     assert_eq!(build_tree(&cfg).err(), Some(TreeError::NegativeStack));
 
     for size in [0.0, -0.5, f64::NAN, f64::INFINITY] {
-        let cfg = GameConfig {
-            bet_sizes: vec![0.5, size],
-            ..config(river())
-        };
+        let cfg = config(river()).with_bet_sizes([0.5, size]);
         assert_eq!(
             build_tree(&cfg).err(),
             Some(TreeError::InvalidBetSize { index: 1 }),
@@ -104,10 +97,7 @@ fn build_tree_rejects_illegal_chip_amounts_and_bet_sizes() {
     }
 
     // The bounded builder validates before spending any budget.
-    let cfg = GameConfig {
-        pot: Chips::ZERO,
-        ..config(river())
-    };
+    let cfg = config_with(river(), Chips::ZERO, Chips::whole(100));
     assert_eq!(
         build_tree_bounded(&cfg, 0).err(),
         Some(TreeError::NonPositivePot)
@@ -117,17 +107,11 @@ fn build_tree_rejects_illegal_chip_amounts_and_bet_sizes() {
 #[test]
 fn build_tree_accepts_degenerate_but_legal_configs() {
     // No bet sizes: a check-down game.
-    let cfg = GameConfig {
-        bet_sizes: vec![],
-        ..config(river())
-    };
+    let cfg = GameConfig::new(river(), Chips::whole(100), Chips::whole(100));
     assert_eq!(build_tree(&cfg).unwrap().num_decision_nodes, 2);
 
     // No stack behind: nobody can bet, so the root is the showdown.
-    let cfg = GameConfig {
-        effective_stack: Chips::ZERO,
-        ..config(river())
-    };
+    let cfg = config_with(river(), Chips::whole(100), Chips::ZERO);
     assert_eq!(build_tree(&cfg).unwrap().num_decision_nodes, 0);
 }
 
@@ -144,7 +128,7 @@ fn trainer_rejects_an_illegal_board_on_a_hand_edited_tree() {
     assert_eq!(
         error,
         Some(TrainerError::Board(BoardError::DuplicateCard {
-            card: card_from_str("Ks").unwrap()
+            card: "Ks".parse::<Card>().unwrap()
         }))
     );
 }
@@ -237,9 +221,9 @@ fn trainer_rejects_malformed_hand_built_trees() {
 
     // A chance node that skips an undealt card.
     let turn = board(&["Ks", "Th", "7s", "4d"]);
-    let dead = set_from_cards(&turn);
-    let children = (0..52u8)
-        .filter(|&c| dead & (1 << c) == 0)
+    let dead = CardSet::from_cards(&turn);
+    let children = Card::all()
+        .filter(|&c| !dead.contains(c))
         .skip(1)
         .map(|c| (vec![c], showdown()))
         .collect();
@@ -274,22 +258,19 @@ fn trainer_rejects_empty_ranges() {
 #[test]
 fn trainer_rejects_invalid_combos_and_weights() {
     let ip = vec![combo("Qc", "Qd", 1.0)];
-    let invalid_cards = [
-        Combo {
-            cards: [0, 52],
-            weight: 1.0,
-        },
-        combo("Ac", "Ac", 1.0),
-    ];
-    for bad in invalid_cards {
-        assert_eq!(
-            river_trainer([vec![combo("Ad", "Ah", 1.0), bad], ip.clone()]).err(),
-            Some(TrainerError::InvalidCombo {
-                player: Player::Oop,
-                index: 1
-            })
-        );
-    }
+    // `Card` rules out cards outside the deck; a repeated card is still
+    // possible.
+    assert_eq!(
+        river_trainer([
+            vec![combo("Ad", "Ah", 1.0), combo("Ac", "Ac", 1.0)],
+            ip.clone()
+        ])
+        .err(),
+        Some(TrainerError::InvalidCombo {
+            player: Player::Oop,
+            index: 1
+        })
+    );
 
     for weight in [-1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
@@ -319,8 +300,10 @@ fn trainer_rejects_invalid_combos_and_weights() {
 #[test]
 fn trainer_rejects_combos_that_use_board_cards() {
     // Without the board as dead cards, KK keeps combos that hold the Ks.
-    let oop = Range::parse("KK").unwrap().combos(0);
-    let ip = Range::parse("AA").unwrap().combos(set_from_cards(&river()));
+    let oop = Range::parse("KK").unwrap().combos(CardSet::EMPTY);
+    let ip = Range::parse("AA")
+        .unwrap()
+        .combos(CardSet::from_cards(&river()));
     let error = river_trainer([oop, ip]).err();
     assert!(
         matches!(
@@ -369,10 +352,7 @@ fn trainer_rejects_zero_bucket_abstraction() {
 #[test]
 fn trainer_rejects_asymmetric_ranges_on_suit_reduced_trees() {
     let turn = board(&["Js", "9s", "4d", "2d"]);
-    let cfg = GameConfig {
-        suit_isomorphism: true,
-        ..config(turn.clone())
-    };
+    let cfg = config(turn.clone()).with_suit_isomorphism(true);
     let [mut oop, ip] = combos("AKs,AQs", "AKs,AQs", &turn);
     oop[0].weight = 0.25;
     let error = Trainer::new(
@@ -457,17 +437,17 @@ fn trainer_rejects_chance_groups_that_are_not_suit_swaps() {
     // Regression: a hand-built group like [Ks, Kc] on a board with clubs used
     // to pass `Trainer::new` and then panic in training.
     let turn = board(&["2h", "7c", "9d", "Jc"]);
-    let c = |s: &str| card_from_str(s).unwrap();
+    let c = |s: &str| s.parse::<Card>().unwrap();
     let chance_tree = |groups: &[&[&str]]| {
         let grouped: Vec<Card> = groups.iter().flat_map(|g| g.iter().map(|s| c(s))).collect();
         let mut children: Vec<(Vec<Card>, Node)> = groups
             .iter()
             .map(|g| (g.iter().map(|s| c(s)).collect(), showdown()))
             .collect();
-        let dead = set_from_cards(&turn) | set_from_cards(&grouped);
+        let dead = CardSet::from_cards(&turn) | CardSet::from_cards(&grouped);
         children.extend(
-            (0..52u8)
-                .filter(|&card| dead & (1 << card) == 0)
+            Card::all()
+                .filter(|&card| !dead.contains(card))
                 .map(|card| (vec![card], showdown())),
         );
         Tree {
@@ -497,12 +477,12 @@ fn trainer_rejects_chance_groups_that_are_not_suit_swaps() {
     // grouping the three non-heart kings is a legal suit-swap class.
     let flop = board(&["2h", "7h", "9h"]);
     let flop_tree = {
-        let dead = set_from_cards(&flop);
+        let dead = CardSet::from_cards(&flop);
         let mut children = vec![(vec![c("Ks"), c("Kd"), c("Kc")], showdown())];
         children.extend(
-            (0..52u8)
+            Card::all()
                 .filter(|&card| {
-                    dead & (1 << card) == 0 && ![c("Ks"), c("Kd"), c("Kc")].contains(&card)
+                    !dead.contains(card) && ![c("Ks"), c("Kd"), c("Kc")].contains(&card)
                 })
                 .map(|card| (vec![card], showdown())),
         );

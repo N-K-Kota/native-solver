@@ -6,44 +6,114 @@
 //! fractions of the pot and clipped to the smaller of the two stacks (no
 //! side pots — both players start each street with equal remaining stacks,
 //! so this is exact, not an approximation). Chip amounts are exact integers
-//! (`Chips`), so an all-in leaves exactly zero behind at any input scale.
+//! ([`Chips`]), so an all-in leaves exactly zero behind at any input scale.
 
 use super::chips::Chips;
-use crate::card::{
-    card_bit, card_to_string, rank, set_contains, set_from_cards, suit, Card, CardSet,
-};
+use crate::card::{mask_has, mask_of, Card, CardSet};
 
 /// Setup for betting starting from a given (partial or complete) board.
-#[derive(Debug, Clone)]
+///
+/// Build one with [`GameConfig::new`] and the `with_*` methods. Without
+/// them the game has no bet sizes, so every street is checked down.
+///
+/// ```
+/// use native_solver::{build_tree, Card, Chips, GameConfig};
+///
+/// let board: Vec<Card> = ["Ks", "Th", "7s", "4d", "2s"]
+///     .iter()
+///     .map(|s| s.parse())
+///     .collect::<Result<_, _>>()?;
+/// let config = GameConfig::new(board, Chips::whole(100), Chips::whole(100))
+///     .with_bet_sizes([0.5, 1.0])
+///     .with_max_raises(1);
+/// assert_eq!(build_tree(&config)?.num_decision_nodes, 8);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, PartialEq)]
 pub struct GameConfig {
-    /// The already-dealt board this street starts on: 3 cards (flop), 4
-    /// (turn), or 5 (river, no further chance nodes are built).
-    pub board: Vec<Card>,
+    pub(crate) board: Vec<Card>,
+    pub(crate) pot: Chips,
+    pub(crate) effective_stack: Chips,
+    pub(crate) bet_sizes: Vec<f64>,
+    pub(crate) max_raises: u32,
+    pub(crate) suit_isomorphism: bool,
+}
+
+impl GameConfig {
+    /// A game on `board` (3, 4, or 5 cards) with `pot` already in the middle
+    /// and `effective_stack` behind for each player. It starts with no bet
+    /// sizes, no raises, and no suit-isomorphism reduction.
+    pub fn new(board: Vec<Card>, pot: Chips, effective_stack: Chips) -> GameConfig {
+        GameConfig {
+            board,
+            pot,
+            effective_stack,
+            bet_sizes: Vec::new(),
+            max_raises: 0,
+            suit_isomorphism: false,
+        }
+    }
+
+    /// Sets the bet and raise sizes, as fractions of the relevant pot,
+    /// reused on every street. Each amount is rounded half-to-even to a
+    /// whole [`Chips`] unit, clipped to the available stack, and
+    /// deduplicated. No all-in size is added: include a large enough
+    /// fraction for one.
+    pub fn with_bet_sizes(mut self, bet_sizes: impl Into<Vec<f64>>) -> GameConfig {
+        self.bet_sizes = bet_sizes.into();
+        self
+    }
+
+    /// Sets the maximum number of raises per street (the count resets each
+    /// street).
+    pub fn with_max_raises(mut self, max_raises: u32) -> GameConfig {
+        self.max_raises = max_raises;
+        self
+    }
+
+    /// Groups chance-node deals by suit-isomorphism class (see
+    /// `docs/conventions.md`): cards of the same rank whose suits are both
+    /// absent from the board are strategically interchangeable, so the tree
+    /// recurses once per class and the trainer derives the other members'
+    /// values by relabeling suits. Off by default.
+    pub fn with_suit_isomorphism(mut self, suit_isomorphism: bool) -> GameConfig {
+        self.suit_isomorphism = suit_isomorphism;
+        self
+    }
+
+    /// The board the first street starts on.
+    pub fn board(&self) -> &[Card] {
+        &self.board
+    }
+
     /// Chips already in the pot at the start of the first street.
-    pub pot: Chips,
-    /// Each player's remaining stack behind, at the start of the first street.
-    pub effective_stack: Chips,
-    /// Bet/raise sizes, as a fraction of the relevant pot size, reused
-    /// identically on every street. Each amount is rounded half-to-even to a
-    /// whole `Chips` unit, clipped to the available stack, and deduplicated;
-    /// not automatically extended with an all-in option — include a large
-    /// enough fraction for that.
-    pub bet_sizes: Vec<f64>,
-    /// Maximum number of raises allowed per street (resets each street).
-    pub max_raises: u32,
-    /// Group `Chance` node deals by suit-isomorphism class (see
-    /// `docs/conventions.md`): candidate cards of the same
-    /// rank whose suits are both entirely absent from the current board
-    /// are strategically interchangeable, so the tree only recurses once
-    /// per class (via a representative card) and `cfr.rs` derives the
-    /// other members' counterfactual values by relabeling combo indices
-    /// under the corresponding suit swap. When `false`, every class is a
-    /// singleton (one card each): the unreduced tree.
-    pub suit_isomorphism: bool,
+    pub fn pot(&self) -> Chips {
+        self.pot
+    }
+
+    /// Each player's remaining stack at the start of the first street.
+    pub fn effective_stack(&self) -> Chips {
+        self.effective_stack
+    }
+
+    /// Bet and raise sizes, as fractions of the pot.
+    pub fn bet_sizes(&self) -> &[f64] {
+        &self.bet_sizes
+    }
+
+    /// Maximum number of raises per street.
+    pub fn max_raises(&self) -> u32 {
+        self.max_raises
+    }
+
+    /// Whether chance nodes are grouped by suit isomorphism.
+    pub fn suit_isomorphism(&self) -> bool {
+        self.suit_isomorphism
+    }
 }
 
 /// A seat in the heads-up hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Player {
     /// Out of position: acts first on every street. Index 0.
     Oop,
@@ -73,7 +143,7 @@ impl Player {
 }
 
 /// A betting action at a decision node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     /// Pass with no bet to call.
     Check,
@@ -88,12 +158,12 @@ pub enum Action {
 }
 
 /// How a hand ends, with the payoffs the solver uses.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Terminal {
     /// A player folded and `winner` takes the pot; `invested` is each player's total
     /// contribution to the pot at this point (including the pre-street
     /// `pot`, split evenly as each player's baseline), in input chips. Built
-    /// trees derive these from exact `Chips`; they stay `f64` because they are
+    /// trees derive these from exact [`Chips`]; they stay `f64` because they are
     /// the payoffs the solver kernels consume.
     Fold {
         /// The player who did not fold.
@@ -110,7 +180,7 @@ pub enum Terminal {
 }
 
 /// A node of the betting tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     /// A player chooses one of `actions`.
     Decision {
@@ -126,7 +196,7 @@ pub enum Node {
         children: Vec<Node>,
     },
     /// Deals the next community card, grouped into suit-isomorphism
-    /// classes (see `GameConfig::suit_isomorphism`): each entry is one
+    /// classes (see [`GameConfig::suit_isomorphism`]): each entry is one
     /// class's member cards plus the subtree built from its representative
     /// (`members[0]`). With isomorphism disabled every class is a
     /// singleton, so this is equivalent to one child per undealt card (52
@@ -149,11 +219,6 @@ pub enum BoardError {
         /// The number of cards supplied.
         len: usize,
     },
-    /// A card is outside `0..52`.
-    InvalidCard {
-        /// The offending card value.
-        card: Card,
-    },
     /// The same card appears more than once.
     DuplicateCard {
         /// The repeated card.
@@ -165,13 +230,8 @@ impl std::fmt::Display for BoardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WrongSize { len } => write!(f, "board has {len} cards; expected 3, 4, or 5"),
-            Self::InvalidCard { card } => write!(f, "board card {card} is outside 0..52"),
             Self::DuplicateCard { card } => {
-                write!(
-                    f,
-                    "board card {} appears more than once",
-                    card_to_string(*card)
-                )
+                write!(f, "board card {card} appears more than once")
             }
         }
     }
@@ -184,15 +244,11 @@ pub(crate) fn validate_board(board: &[Card]) -> Result<(), BoardError> {
     if !(3..=5).contains(&board.len()) {
         return Err(BoardError::WrongSize { len: board.len() });
     }
-    let mut seen: CardSet = 0;
+    let mut seen = CardSet::EMPTY;
     for &card in board {
-        if card >= 52 {
-            return Err(BoardError::InvalidCard { card });
-        }
-        if set_contains(seen, card) {
+        if !seen.insert(card) {
             return Err(BoardError::DuplicateCard { card });
         }
-        seen |= card_bit(card);
     }
     Ok(())
 }
@@ -201,15 +257,15 @@ pub(crate) fn validate_board(board: &[Card]) -> Result<(), BoardError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TreeError {
-    /// `GameConfig::board` is not a legal flop, turn, or river.
+    /// [`GameConfig::board`] is not a legal flop, turn, or river.
     Board(BoardError),
-    /// `GameConfig::pot` is zero or negative.
+    /// [`GameConfig::pot`] is zero or negative.
     NonPositivePot,
-    /// `GameConfig::effective_stack` is negative.
+    /// [`GameConfig::effective_stack`] is negative.
     NegativeStack,
     /// A bet size is zero, negative, or not finite.
     InvalidBetSize {
-        /// Position of the size in `GameConfig::bet_sizes`.
+        /// Position of the size in [`GameConfig::bet_sizes`].
         index: usize,
     },
     /// The tree would need more decision nodes than the supplied budget.
@@ -272,7 +328,7 @@ fn validate_config(cfg: &GameConfig) -> Result<(), TreeError> {
 }
 
 /// A betting tree and the board it starts from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tree {
     /// The board the first street starts on: 3, 4, or 5 cards.
     pub board: Vec<Card>,
@@ -295,7 +351,7 @@ pub fn build_tree(cfg: &GameConfig) -> Result<Tree, TreeError> {
 
 /// Stops construction before allocating a decision beyond the supplied budget.
 /// Callers must also bound input size and recursion depth (notably max_raises).
-/// Successful trees preserve the same node IDs and actions as `build_tree`.
+/// Successful trees preserve the same node IDs and actions as [`build_tree`].
 ///
 /// # Errors
 /// Returns the same configuration errors as [`build_tree`], or
@@ -349,7 +405,7 @@ impl BuildBudget {
 fn free_suits(board: &[Card]) -> [bool; 4] {
     let mut used = [false; 4];
     for &c in board {
-        used[suit(c) as usize] = true;
+        used[c.suit() as usize] = true;
     }
     [!used[0], !used[1], !used[2], !used[3]]
 }
@@ -360,13 +416,13 @@ fn free_suits(board: &[Card]) -> [bool; 4] {
 /// in a suit already pinned by the board is always its own singleton
 /// class. With `suit_isomorphism` off, every class is a singleton
 /// (equivalent to one child per undealt card).
-/// Not tied to `GameConfig` (only needs the flag, not the rest of the
+/// Not tied to [`GameConfig`] (only needs the flag, not the rest of the
 /// setup) so `cfr.rs` can also call it directly for its own internal
 /// purposes — see `cfr::avg_score`, which always groups this way
 /// regardless of whether the *tree* was built with isomorphism, since
 /// grouping same-rank free-suit cards is always a valid equivalence.
 pub(crate) fn deal_classes(suit_isomorphism: bool, board: &[Card]) -> Vec<Vec<Card>> {
-    let used = set_from_cards(board);
+    let used = mask_of(board);
     let free = if suit_isomorphism {
         free_suits(board)
     } else {
@@ -375,12 +431,12 @@ pub(crate) fn deal_classes(suit_isomorphism: bool, board: &[Card]) -> Vec<Vec<Ca
 
     let mut classes: Vec<Vec<Card>> = Vec::new();
     let mut free_rank_class: [Option<usize>; 13] = [None; 13];
-    for c in 0..52u8 {
-        if set_contains(used, c) {
+    for c in Card::all() {
+        if mask_has(used, c) {
             continue;
         }
-        if free[suit(c) as usize] {
-            let r = rank(c) as usize;
+        if free[c.suit() as usize] {
+            let r = c.rank() as usize;
             match free_rank_class[r] {
                 Some(idx) => classes[idx].push(c),
                 None => {
@@ -432,7 +488,7 @@ fn end_of_street(
 }
 
 /// Terminal payoffs: half the starting pot each plus everything added since.
-/// The half may be a half-unit, so it is applied only after leaving `Chips`.
+/// The half may be a half-unit, so it is applied only after leaving [`Chips`].
 fn invested(cfg: &GameConfig, added: [Chips; 2]) -> [f64; 2] {
     let baseline = cfg.pot.to_f64() / 2.0;
     [baseline + added[0].to_f64(), baseline + added[1].to_f64()]
@@ -575,19 +631,19 @@ fn sized_amounts(fractions: &[f64], pot: Chips, room: Chips) -> Vec<Chips> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::card_from_str;
+    use crate::card::Card;
 
     fn river_board() -> Vec<Card> {
         ["2h", "7c", "9d", "Jc", "4s"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect()
     }
 
     fn turn_board() -> Vec<Card> {
         ["2h", "7c", "9d", "Jc"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect()
     }
 
@@ -994,10 +1050,10 @@ mod tests {
         else {
             panic!("expected a chance node dealing the river")
         };
-        let board_set = set_from_cards(&turn_board());
+        let board_set = mask_of(&turn_board());
         for (members, _) in river_deals {
             for &card in members {
-                assert!(!set_contains(board_set, card));
+                assert!(!mask_has(board_set, card));
             }
         }
     }
@@ -1007,7 +1063,7 @@ mod tests {
         // Board uses only clubs and diamonds -> hearts and spades are free.
         let board: Vec<Card> = ["2c", "7d", "9c"]
             .iter()
-            .map(|s| card_from_str(s).unwrap())
+            .map(|s| s.parse::<Card>().unwrap())
             .collect();
         let cfg = GameConfig {
             board: board.clone(),
@@ -1037,13 +1093,12 @@ mod tests {
         // invariants directly: every class shares one rank, only free-suit
         // (h/s) cards are ever grouped into a class of size > 1, and every
         // undealt card appears in exactly one class.
-        let used = set_from_cards(&board);
+        let used = mask_of(&board);
         let mut seen = std::collections::HashSet::new();
         let mut total_members = 0;
         for (members, _) in deals {
             assert!(!members.is_empty());
-            let ranks: std::collections::HashSet<u8> =
-                members.iter().map(|&c| crate::card::rank(c)).collect();
+            let ranks: std::collections::HashSet<u8> = members.iter().map(|&c| c.rank()).collect();
             assert_eq!(
                 ranks.len(),
                 1,
@@ -1051,7 +1106,7 @@ mod tests {
             );
             if members.len() > 1 {
                 for &c in members {
-                    let s = crate::card::suit(c);
+                    let s = c.suit();
                     assert!(
                         s == 2 || s == 3,
                         "grouped members must use a free suit (h=2, s=3)"
@@ -1060,7 +1115,7 @@ mod tests {
             }
             for &c in members {
                 assert!(
-                    !set_contains(used, c),
+                    !mask_has(used, c),
                     "class must not include an already-used card"
                 );
                 assert!(

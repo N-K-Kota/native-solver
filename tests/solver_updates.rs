@@ -4,10 +4,10 @@ use native_solver::solver::TrainerOptions;
 use native_solver::solver::{
     build_tree, CardAbstraction, GameConfig, Node, SolverAlgorithm, Trainer, UpdateSchedule,
 };
-use native_solver::{card_from_str, evaluate_7, Card, Combo};
+use native_solver::{evaluate_7, Card, Combo};
 
 fn card(s: &str) -> Card {
-    card_from_str(s).unwrap()
+    s.parse::<Card>().unwrap()
 }
 fn river_fixture(algorithm: SolverAlgorithm, bucketed: bool) -> (Trainer, usize) {
     scheduled_fixture(algorithm, bucketed, UpdateSchedule::Simultaneous)
@@ -18,14 +18,11 @@ fn scheduled_fixture(
     schedule: UpdateSchedule,
 ) -> (Trainer, usize) {
     let board = ["2h", "7c", "9d", "Jc", "4s"].map(card).to_vec();
-    let tree = build_tree(&GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(200),
-        bet_sizes: vec![0.5, 1.0],
-        max_raises: 1,
-        suit_isomorphism: false,
-    })
+    let tree = build_tree(
+        &GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(200))
+            .with_bet_sizes([0.5, 1.0])
+            .with_max_raises(1),
+    )
     .unwrap();
     let nodes = tree.num_decision_nodes;
     let combos = [
@@ -207,14 +204,7 @@ fn kuhn_equivalent_config() -> (GameConfig, WeightedCombos) {
     };
     assert!(score(combos[0]) < score(combos[1]));
     assert!(score(combos[1]) < score(combos[2]));
-    let config = GameConfig {
-        board,
-        pot: Chips::whole(2),
-        effective_stack: Chips::whole(1),
-        bet_sizes: vec![0.5],
-        max_raises: 0,
-        suit_isomorphism: false,
-    };
+    let config = GameConfig::new(board, Chips::whole(2), Chips::whole(1)).with_bet_sizes([0.5]);
     (config, [combos.clone(), combos])
 }
 
@@ -344,14 +334,9 @@ fn bucket_average_ignores_combos_blocked_by_the_dealt_card() {
     // and it has zero reach, so no reach may enter that bucket's average:
     // it must stay uniform.
     let turn = ["2h", "7c", "9d", "Jc"].map(card).to_vec();
-    let tree = build_tree(&GameConfig {
-        board: turn.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(100),
-        bet_sizes: vec![1.0],
-        max_raises: 0,
-        suit_isomorphism: false,
-    })
+    let tree = build_tree(
+        &GameConfig::new(turn.clone(), Chips::whole(100), Chips::whole(100)).with_bet_sizes([1.0]),
+    )
     .unwrap();
     let combos = [
         vec![

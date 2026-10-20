@@ -1,7 +1,7 @@
 //! Fixed-policy audit, independent of equality between two learning runs.
 //! The adapter is test-only: complete trees, symmetric ranges, no abstraction.
 use super::*;
-use crate::card::card_from_str;
+use crate::card::Card;
 use crate::range::Range;
 use crate::solver::Chips;
 use crate::solver::{build_tree_bounded, quality::ReferenceEvaluator, GameConfig};
@@ -46,7 +46,7 @@ fn expand(
                          cards: [a, b],
                          weight: w,
                      }| {
-                        let (x, y) = (map[a as usize], map[b as usize]);
+                        let (x, y) = (Card(map[a.0 as usize]), Card(map[b.0 as usize]));
                         let i = combos
                             .iter()
                             .position(|&Combo { cards: [c, d], .. }| {
@@ -78,12 +78,12 @@ fn expand(
             .iter()
             .map(|(cards, child)| {
                 assert_eq!(cards.len(), 1);
-                let card = map[cards[0] as usize];
+                let card = Card(map[cards[0].0 as usize]);
                 let (members, rep) = rc
                     .iter()
                     .find(|(members, _)| members.contains(&card))
                     .unwrap();
-                let (a, b) = (card % 4, members[0] % 4);
+                let (a, b) = (card.suit(), members[0].suit());
                 let composed =
                     usize::from(a != b && map.iter().enumerate().any(|(i, &c)| i != c as usize));
                 let mut next = map;
@@ -128,7 +128,7 @@ fn projected(
 
 fn config(board: &[&str]) -> GameConfig {
     GameConfig {
-        board: board.iter().map(|s| card_from_str(s).unwrap()).collect(),
+        board: board.iter().map(|s| s.parse::<Card>().unwrap()).collect(),
         pot: Chips::whole(100),
         effective_stack: Chips::whole(150),
         bet_sizes: vec![0.33, 0.75],
@@ -139,7 +139,9 @@ fn config(board: &[&str]) -> GameConfig {
 
 fn combos(cfg: &GameConfig, ranges: [&str; 2]) -> [Vec<Combo>; 2] {
     ranges.map(|s| {
-        let mut cs = Range::parse(s).unwrap().combos(set_from_cards(&cfg.board));
+        let mut cs = Range::parse(s)
+            .unwrap()
+            .combos(CardSet::from_cards(&cfg.board));
         for combo in &mut cs {
             combo.cards.sort_unstable();
         }
@@ -387,7 +389,7 @@ fn assert_policy_symmetry(t: &Trainer) {
     let mut compared = 0;
     for (id, (player, board)) in t.game.node_meta.iter().enumerate() {
         let free: Vec<_> = (0..4)
-            .filter(|s| !board.iter().any(|&c| suit(c) == *s))
+            .filter(|s| !board.iter().any(|&c| c.suit() == *s))
             .collect();
         let (_, buckets) = t.game.combo_buckets(*player, board);
         let current = current(t, id);

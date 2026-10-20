@@ -8,7 +8,7 @@
 //! sum fallback preserves relative precision for nearly all-blocked reach;
 //! adversarial reaches can therefore still take quadratic time.
 
-use crate::card::{set_contains, Card, CardSet};
+use crate::card::{mask_has, Card};
 use std::collections::HashMap;
 
 use crate::range::Combo;
@@ -27,7 +27,7 @@ pub(super) struct BoardOrder {
 }
 
 impl BoardOrder {
-    pub(super) fn new(combos: &[Vec<Combo>; 2], scores: &[Vec<u32>; 2], board: CardSet) -> Self {
+    pub(super) fn new(combos: &[Vec<Combo>; 2], scores: &[Vec<u32>; 2], board: u64) -> Self {
         let order: [Vec<usize>; 2] = std::array::from_fn(|p| {
             let mut order: Vec<_> = (0..combos[p].len())
                 .filter(|&i| live(combos[p][i], board))
@@ -82,17 +82,17 @@ impl ReachMass {
             return;
         }
         self.total += weight;
-        self.card[combo.cards[0] as usize] += weight;
-        self.card[combo.cards[1] as usize] += weight;
+        self.card[combo.cards[0].0 as usize] += weight;
+        self.card[combo.cards[1].0 as usize] += weight;
         self.support += 1;
-        self.card_support[combo.cards[0] as usize] += 1;
-        self.card_support[combo.cards[1] as usize] += 1;
+        self.card_support[combo.cards[0].0 as usize] += 1;
+        self.card_support[combo.cards[1].0 as usize] += 1;
     }
 
     fn support_excluding(&self, combo: Combo) -> i32 {
         self.support
-            - self.card_support[combo.cards[0] as usize]
-            - self.card_support[combo.cards[1] as usize]
+            - self.card_support[combo.cards[0].0 as usize]
+            - self.card_support[combo.cards[1].0 as usize]
     }
 
     fn cancellation_prone(&self, value: f64) -> bool {
@@ -109,7 +109,7 @@ impl ReachMass {
             // rounding residue must not invent reachable private deals.
             0.0
         } else {
-            self.total - self.card[combo.cards[0] as usize] - self.card[combo.cards[1] as usize]
+            self.total - self.card[combo.cards[0].0 as usize] - self.card[combo.cards[1].0 as usize]
         }
     }
 }
@@ -119,8 +119,8 @@ fn disjoint(a: Combo, b: Combo) -> bool {
     a0 != b0 && a0 != b1 && a1 != b0 && a1 != b1
 }
 
-fn live(combo: Combo, board: CardSet) -> bool {
-    !set_contains(board, combo.cards[0]) && !set_contains(board, combo.cards[1])
+fn live(combo: Combo, board: u64) -> bool {
+    !mask_has(board, combo.cards[0]) && !mask_has(board, combo.cards[1])
 }
 
 impl TerminalIndex {
@@ -152,7 +152,7 @@ impl TerminalIndex {
         combos: &[Vec<Combo>; 2],
         player: usize,
         reach: &[f64],
-        board: CardSet,
+        board: u64,
     ) -> Vec<f64> {
         let mut mass = ReachMass::new();
         for (&combo, &weight) in combos[1 - player].iter().zip(reach) {
@@ -173,8 +173,8 @@ impl TerminalIndex {
                         0.0
                     } else {
                         let value = mass.total
-                            - mass.card[combo.cards[0] as usize]
-                            - mass.card[combo.cards[1] as usize]
+                            - mass.card[combo.cards[0].0 as usize]
+                            - mass.card[combo.cards[1].0 as usize]
                             + same.iter().map(|&j| reach[j]).sum::<f64>();
                         if mass.cancellation_prone(value) {
                             combos[1 - player]
@@ -207,7 +207,7 @@ impl TerminalIndex {
         reach: &[f64],
         scores: &[Vec<u32>; 2],
         order: &BoardOrder,
-        board: CardSet,
+        board: u64,
         invested: &[f64; 2],
     ) -> Vec<f64> {
         let opp = 1 - player;

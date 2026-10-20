@@ -1,8 +1,8 @@
 //! Independent, exact strategy-quality reference for small heads-up trees.
 //!
-//! This deliberately does not call `Trainer` traversal, chance, blocker, or
+//! This deliberately does not call [`Trainer`](crate::Trainer) traversal, chance, blocker, or
 //! terminal kernels. It enumerates legal private deals, evaluates showdowns
-//! with `evaluate_7`, and solves a separate decision problem for each own hand.
+//! with [`evaluate_7`](crate::evaluate_7), and solves a separate decision problem for each own hand.
 //! Opponent states are summed **before** maximizing at an information set:
 //! a best response observes its own cards and public history, never the other
 //! player's cards. Public deals condition on both players' private cards.
@@ -16,7 +16,8 @@
 
 use super::chips::Chips;
 use super::tree::{Action, Node, Terminal};
-use crate::{evaluate_7, Card};
+use crate::card::{bit, Card};
+use crate::eval::score_7;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -26,7 +27,7 @@ type Policy = HashMap<usize, Vec<Vec<f64>>>;
 /// Normalized quality of a fixed behavioral strategy profile.
 ///
 /// All values are in chips, including half the initial pot in each player's
-/// invested baseline, as in `Terminal`. Expectations are over legal initial
+/// invested baseline, as in [`Terminal`]. Expectations are over legal initial
 /// private deals with probability `w_oop * w_ip / joint_mass` and uniform legal
 /// runouts. `profile_ev` is the profile's value for each player;
 /// `best_response_ev[p]` holds the other player's policy fixed while player p
@@ -115,16 +116,33 @@ pub struct ReferenceEvaluator<'a> {
     outcomes: HashMap<u64, Vec<i8>>,
 }
 
+impl std::fmt::Debug for ReferenceEvaluator<'_> {
+    /// A summary: board, range sizes, decisions, and joint mass.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReferenceEvaluator")
+            .field("initial_board", &self.initial_board)
+            .field("num_combos", &[self.combos[0].len(), self.combos[1].len()])
+            .field("num_decisions", &self.decisions.len())
+            .field("joint_mass", &self.joint_mass)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> ReferenceEvaluator<'a> {
     /// Validate the board, ranges, and complete unreduced tree.
     ///
     /// Finite nonnegative weights need not sum to one or be at most one.
     /// Board-blocked combos are accepted but excluded, as are conflicting
-    /// private pairs and zero-weight combos. Duplicate/reversed combos, repeated
-    /// or out-of-deck cards, nonfinite/negative weights, and zero/nonfinite legal
-    /// joint mass are errors. Decision IDs must be unique public histories.
-    /// Terminal payoffs and action labels define the supplied game; this checks
-    /// structural integrity, not whether the betting sequence follows NLHE rules.
+    /// private pairs and zero-weight combos. Decision IDs must be unique
+    /// public histories. Terminal payoffs and action labels define the
+    /// supplied game; this checks structural integrity, not whether the
+    /// betting sequence follows NLHE rules.
+    ///
+    /// # Errors
+    /// Returns a [`QualityError`] for a board that is not 3–5 distinct cards,
+    /// duplicate or reversed combos, a combo holding one card twice,
+    /// nonfinite or negative weights, zero or nonfinite legal joint mass, a
+    /// malformed tree, or a suit-reduced chance node.
     pub fn new(
         root: &'a Node,
         initial_board: &'a [Card],
@@ -135,12 +153,10 @@ impl<'a> ReferenceEvaluator<'a> {
         }
         let mut board_mask = 0u64;
         for &card in initial_board {
-            if card >= 52 || board_mask & (1u64 << card) != 0 {
-                return Err(QualityError::InvalidBoard(
-                    "cards must be distinct and in 0..52".into(),
-                ));
+            if board_mask & bit(card) != 0 {
+                return Err(QualityError::InvalidBoard("cards must be distinct".into()));
             }
-            board_mask |= 1u64 << card;
+            board_mask |= bit(card);
         }
         let mut masks = [Vec::new(), Vec::new()];
         for player in 0..2 {
@@ -150,8 +166,8 @@ impl<'a> ReferenceEvaluator<'a> {
                 weight,
             } in combos[player]
             {
-                let reason = if a >= 52 || b >= 52 || a == b {
-                    Some("a combo must contain two distinct cards in 0..52")
+                let reason = if a == b {
+                    Some("a combo must contain two distinct cards")
                 } else if !weight.is_finite() || weight < 0.0 {
                     Some("range weights must be finite and nonnegative")
                 } else if !seen.insert((a.min(b), a.max(b))) {
@@ -165,7 +181,7 @@ impl<'a> ReferenceEvaluator<'a> {
                         reason: reason.into(),
                     });
                 }
-                masks[player].push((1u64 << a) | (1u64 << b));
+                masks[player].push((bit(a)) | (bit(b)));
             }
         }
         let mut prior = Vec::new();
@@ -204,6 +220,11 @@ impl<'a> ReferenceEvaluator<'a> {
     /// probabilities in [0, 1] summing to one within 1e-10. Accepted roundoff is
     /// normalized to exactly one. The callback is not consulted during BR
     /// search, and no trainer state or regret tables are read or modified.
+    ///
+    /// # Errors
+    /// Returns [`QualityError::InvalidStrategy`] for a strategy with the
+    /// wrong shape or a column that is not a distribution, and
+    /// [`QualityError::NonFiniteResult`] if evaluation overflows.
     pub fn evaluate<F>(&self, mut strategy: F) -> Result<StrategyQuality, QualityError>
     where
         F: FnMut(usize) -> Vec<Vec<f64>>,
@@ -337,12 +358,12 @@ impl<'a> ReferenceEvaluator<'a> {
                 }
                 let mut seen = mask(board);
                 for (members, child) in children {
-                    if members.len() != 1 || members[0] >= 52 || seen & (1u64 << members[0]) != 0 {
+                    if members.len() != 1 || seen & bit(members[0]) != 0 {
                         return Err(invalid(
                             "chance cards must be distinct singletons outside the public board",
                         ));
                     }
-                    seen |= 1u64 << members[0];
+                    seen |= bit(members[0]);
                     board.push(members[0]);
                     self.validate_tree(child, board, ids, depth + 1)?;
                     board.pop();
@@ -380,7 +401,7 @@ impl<'a> ReferenceEvaluator<'a> {
                     .enumerate()
                     .map(|(i, &Combo { cards: [a, b], .. })| {
                         (self.masks[player][i] & board_mask == 0).then(|| {
-                            evaluate_7([a, b, board[0], board[1], board[2], board[3], board[4]])
+                            score_7([a, b, board[0], board[1], board[2], board[3], board[4]])
                         })
                     })
                     .collect()
@@ -459,7 +480,7 @@ impl PrivateProblem<'_, '_> {
                 children
                     .iter()
                     .map(|(members, child)| {
-                        let card = 1u64 << members[0];
+                        let card = bit(members[0]);
                         if self.evaluator.masks[self.player][self.own] & card != 0 {
                             return 0.0;
                         }
@@ -519,5 +540,5 @@ impl PrivateProblem<'_, '_> {
 }
 
 fn mask(cards: &[Card]) -> u64 {
-    cards.iter().fold(0, |mask, &card| mask | (1u64 << card))
+    cards.iter().fold(0, |mask, &card| mask | (bit(card)))
 }

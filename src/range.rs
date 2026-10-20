@@ -2,8 +2,10 @@
 //! "AKo", "AA"), each with a weight in `0.0..=1.0`, expandable into
 //! concrete card-pair combos with dead-card removal applied.
 
-use crate::card::{card_bit, set_contains, Card, CardSet, RANKS};
+use crate::card::{bit, Card, CardSet, RANKS};
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 
 /// Why a range spec or hand weight was rejected.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,8 +30,8 @@ pub enum RangeError {
     InvalidNotation(String),
 }
 
-impl std::fmt::Display for RangeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for RangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidWeight { token } => write!(f, "invalid weight in '{token}'"),
             Self::WeightOutOfRange(_) => {
@@ -72,12 +74,17 @@ impl Combo {
 
     /// The two cards as a set, for dead-card and blocker checks.
     pub fn mask(&self) -> CardSet {
-        card_bit(self.cards[0]) | card_bit(self.cards[1])
+        CardSet(self.bits())
+    }
+
+    /// [`mask`](Self::mask) as a raw bitmask, for the solver's hot paths.
+    pub(crate) fn bits(&self) -> u64 {
+        bit(self.cards[0]) | bit(self.cards[1])
     }
 
     /// Whether the combo shares a card with `cards`.
     pub fn conflicts_with(&self, cards: CardSet) -> bool {
-        self.mask() & cards != 0
+        !self.mask().is_disjoint(cards)
     }
 
     /// The cards ordered low then high, so equal hands compare equal
@@ -89,7 +96,24 @@ impl Combo {
 }
 
 /// A weighted preflop range, keyed by canonical hand notation.
-#[derive(Debug, Clone, Default)]
+///
+/// Parse one from text with [`str::parse`] (or [`Range::parse`]); its
+/// [`Display`](fmt::Display) form parses back to the same range.
+///
+/// ```
+/// use native_solver::{Card, CardSet, Range};
+///
+/// let range: Range = "AA, AKs, QJo:0.5".parse()?;
+/// assert_eq!(range.weight("AKs"), 1.0);
+/// assert_eq!(range.weight("JQo"), 0.5); // any rank order and case
+/// assert_eq!(range.to_string(), "AA,AKs,QJo:0.5");
+///
+/// // Expand into combos, dropping those that use a dead card.
+/// let dead = CardSet::from_cards(&["As".parse::<Card>()?]);
+/// assert_eq!(range.combos(dead).len(), 3 + 3 + 12);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Range {
     weights: HashMap<String, f64>,
 }
@@ -101,7 +125,13 @@ impl Range {
     }
 
     /// Parse a comma-separated range spec, e.g. `"AA,AKs,AQo:0.5,72o"`.
-    /// A hand without an explicit `:weight` suffix gets weight `1.0`.
+    /// A hand without an explicit `:weight` suffix gets weight `1.0`. Same as
+    /// `spec.parse::<Range>()`.
+    ///
+    /// # Errors
+    /// Returns a [`RangeError`] for a hand that is not canonical notation
+    /// (two ranks, plus `s` or `o` when they differ) or a weight that is not
+    /// a number in `0.0..=1.0`.
     pub fn parse(spec: &str) -> Result<Self, RangeError> {
         let mut range = Range::new();
         for token in spec.split(',') {
@@ -125,18 +155,28 @@ impl Range {
         Ok(range)
     }
 
-    /// Set the weight for a canonical hand (e.g. "AA", "AKs", "72o").
+    /// Set the weight for a hand in canonical notation (e.g. "AA", "AKs",
+    /// "72o"; any rank order and case). A weight of `0.0` removes the hand.
+    ///
+    /// # Errors
+    /// Returns a [`RangeError`] if `hand` is not canonical notation or
+    /// `weight` is not in `0.0..=1.0`.
     pub fn set_weight(&mut self, hand: &str, weight: f64) -> Result<(), RangeError> {
         if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
             return Err(RangeError::WeightOutOfRange(weight));
         }
         let canon = canonicalize(hand)?;
-        self.weights.insert(canon, weight);
+        if weight == 0.0 {
+            self.weights.remove(&canon);
+        } else {
+            self.weights.insert(canon, weight);
+        }
         Ok(())
     }
 
-    /// Get the weight for a canonical hand, defaulting to 0.0 if unset.
-    pub fn get_weight(&self, hand: &str) -> f64 {
+    /// The weight of a hand in canonical notation; `0.0` if it is not in the
+    /// range or the notation is invalid.
+    pub fn weight(&self, hand: &str) -> f64 {
         canonicalize(hand)
             .ok()
             .and_then(|c| self.weights.get(&c).copied())
@@ -158,6 +198,37 @@ impl Range {
         }
         out.sort_unstable_by_key(Combo::sorted_cards);
         out
+    }
+}
+
+impl FromStr for Range {
+    type Err = RangeError;
+
+    /// See [`Range::parse`].
+    fn from_str(spec: &str) -> Result<Range, RangeError> {
+        Range::parse(spec)
+    }
+}
+
+impl fmt::Display for Range {
+    /// The hands in [`all_canonical_hands`] order, comma-separated, with a
+    /// `:weight` suffix unless the weight is `1`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for hand in all_canonical_hands() {
+            let Some(&weight) = self.weights.get(&hand) else {
+                continue;
+            };
+            if !first {
+                f.write_str(",")?;
+            }
+            first = false;
+            f.write_str(&hand)?;
+            if weight != 1.0 {
+                write!(f, ":{weight}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -230,7 +301,7 @@ fn canonicalize(hand: &str) -> Result<String, RangeError> {
 fn hand_combos(canon: &str, weight: f64, dead: CardSet, out: &mut Vec<Combo>) {
     let chars: Vec<char> = canon.chars().collect();
     let push_if_alive = |c1: Card, c2: Card, out: &mut Vec<Combo>| {
-        if !set_contains(dead, c1) && !set_contains(dead, c2) {
+        if !dead.contains(c1) && !dead.contains(c2) {
             out.push(Combo::new(c1, c2, weight));
         }
     };
@@ -239,7 +310,7 @@ fn hand_combos(canon: &str, weight: f64, dead: CardSet, out: &mut Vec<Combo>) {
         let r = rank_index(chars[0]).expect("canonical hand has valid rank");
         for s1 in 0..4u8 {
             for s2 in (s1 + 1)..4u8 {
-                push_if_alive(r * 4 + s1, r * 4 + s2, out);
+                push_if_alive(Card(r * 4 + s1), Card(r * 4 + s2), out);
             }
         }
         return;
@@ -250,13 +321,13 @@ fn hand_combos(canon: &str, weight: f64, dead: CardSet, out: &mut Vec<Combo>) {
     let suited = chars[2] == 's';
     if suited {
         for s in 0..4u8 {
-            push_if_alive(r1 * 4 + s, r2 * 4 + s, out);
+            push_if_alive(Card(r1 * 4 + s), Card(r2 * 4 + s), out);
         }
     } else {
         for s1 in 0..4u8 {
             for s2 in 0..4u8 {
                 if s1 != s2 {
-                    push_if_alive(r1 * 4 + s1, r2 * 4 + s2, out);
+                    push_if_alive(Card(r1 * 4 + s1), Card(r2 * 4 + s2), out);
                 }
             }
         }
@@ -266,14 +337,14 @@ fn hand_combos(canon: &str, weight: f64, dead: CardSet, out: &mut Vec<Combo>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::card::{card_from_str, set_from_cards};
 
     /// `HashMap` iteration order differs between instances, so without the
     /// sort two parses of the same spec could expand in different orders.
     #[test]
     fn combo_order_is_deterministic_and_sorted() {
         let spec = "AA,KK:0.5,AKs,AQo,T9s,72o,JJ,QJs:0.25";
-        let dead = set_from_cards(&[card_from_str("Ah").unwrap(), card_from_str("9s").unwrap()]);
+        let dead =
+            CardSet::from_cards(&["Ah".parse::<Card>().unwrap(), "9s".parse::<Card>().unwrap()]);
         let first = Range::parse(spec).unwrap().combos(dead);
         for _ in 0..50 {
             assert_eq!(Range::parse(spec).unwrap().combos(dead), first);
@@ -288,19 +359,19 @@ mod tests {
     #[test]
     fn pair_expands_to_six_combos() {
         let range = Range::parse("AA").unwrap();
-        assert_eq!(range.combos(0).len(), 6);
+        assert_eq!(range.combos(CardSet::EMPTY).len(), 6);
     }
 
     #[test]
     fn suited_expands_to_four_combos() {
         let range = Range::parse("AKs").unwrap();
-        assert_eq!(range.combos(0).len(), 4);
+        assert_eq!(range.combos(CardSet::EMPTY).len(), 4);
     }
 
     #[test]
     fn offsuit_expands_to_twelve_combos() {
         let range = Range::parse("AKo").unwrap();
-        assert_eq!(range.combos(0).len(), 12);
+        assert_eq!(range.combos(CardSet::EMPTY).len(), 12);
     }
 
     #[test]
@@ -308,13 +379,13 @@ mod tests {
         let spec = all_canonical_hands().join(",");
         let range = Range::parse(&spec).unwrap();
         assert_eq!(all_canonical_hands().len(), 169);
-        assert_eq!(range.combos(0).len(), 1326);
+        assert_eq!(range.combos(CardSet::EMPTY).len(), 1326);
     }
 
     #[test]
     fn dead_cards_remove_conflicting_combos() {
         let range = Range::parse("AA").unwrap();
-        let dead = set_from_cards(&[card_from_str("Ah").unwrap()]);
+        let dead = CardSet::from_cards(&["Ah".parse::<Card>().unwrap()]);
         // One ace is dead, so only C(3,2) = 3 combos survive.
         assert_eq!(range.combos(dead).len(), 3);
     }
@@ -325,25 +396,44 @@ mod tests {
         a.set_weight("KAs", 1.0).unwrap();
         let mut b = Range::new();
         b.set_weight("aks", 1.0).unwrap();
-        assert_eq!(a.get_weight("AKs"), 1.0);
-        assert_eq!(b.get_weight("AKs"), 1.0);
+        assert_eq!(a.weight("AKs"), 1.0);
+        assert_eq!(b.weight("AKs"), 1.0);
+    }
+
+    #[test]
+    fn display_round_trips_through_from_str() {
+        let range: Range = "QJo:0.5, aks, AA, 72o:0.25, KK:0".parse().unwrap();
+        assert_eq!(range.to_string(), "AA,AKs,QJo:0.5,72o:0.25");
+        assert_eq!(range.to_string().parse::<Range>().unwrap(), range);
+        let mut full = Range::new();
+        for hand in all_canonical_hands() {
+            full.set_weight(&hand, 0.3).unwrap();
+        }
+        assert_eq!(full.to_string().parse::<Range>().unwrap(), full);
+    }
+
+    #[test]
+    fn zero_weight_removes_a_hand() {
+        let mut range: Range = "AA,KK".parse().unwrap();
+        range.set_weight("KK", 0.0).unwrap();
+        assert_eq!(range, "AA".parse().unwrap());
     }
 
     #[test]
     fn parses_per_hand_weights() {
         let range = Range::parse("AA, AKo:0.5, 72o:0.25").unwrap();
-        assert_eq!(range.get_weight("AA"), 1.0);
-        assert_eq!(range.get_weight("AKo"), 0.5);
-        assert_eq!(range.get_weight("72o"), 0.25);
-        assert_eq!(range.get_weight("KK"), 0.0);
+        assert_eq!(range.weight("AA"), 1.0);
+        assert_eq!(range.weight("AKo"), 0.5);
+        assert_eq!(range.weight("72o"), 0.25);
+        assert_eq!(range.weight("KK"), 0.0);
     }
 
     #[test]
     fn whitespace_around_the_weight_separator_is_ignored() {
         let range = Range::parse("AA : 0.5, AKs :0.25,QJo: 0.75").unwrap();
-        assert_eq!(range.get_weight("AA"), 0.5);
-        assert_eq!(range.get_weight("AKs"), 0.25);
-        assert_eq!(range.get_weight("QJo"), 0.75);
+        assert_eq!(range.weight("AA"), 0.5);
+        assert_eq!(range.weight("AKs"), 0.25);
+        assert_eq!(range.weight("QJo"), 0.75);
     }
 
     #[test]

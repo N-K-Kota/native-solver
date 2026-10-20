@@ -4,22 +4,16 @@ use native_solver::solver::{
     build_tree, CardAbstraction, Chips, GameConfig, Player, SolverAlgorithm, Trainer,
     TrainerOptions, UpdateSchedule,
 };
-use native_solver::{card_from_str, evaluate_7, set_from_cards, Card, Combo, Range};
+use native_solver::{evaluate_7, Card, CardSet, Combo, Range};
 
 fn board(names: &[&str]) -> Vec<Card> {
-    names.iter().map(|s| card_from_str(s).unwrap()).collect()
+    names.iter().map(|s| s.parse::<Card>().unwrap()).collect()
 }
 
 fn trainer(board: &[Card], oop: &str, ip: &str, options: TrainerOptions) -> Trainer {
-    let cfg = GameConfig {
-        board: board.to_vec(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(100),
-        bet_sizes: vec![1.0],
-        max_raises: 0,
-        suit_isomorphism: false,
-    };
-    let dead = set_from_cards(board);
+    let cfg =
+        GameConfig::new(board.to_vec(), Chips::whole(100), Chips::whole(100)).with_bet_sizes([1.0]);
+    let dead = CardSet::from_cards(board);
     let combos = [
         Range::parse(oop).unwrap().combos(dead),
         Range::parse(ip).unwrap().combos(dead),
@@ -29,17 +23,17 @@ fn trainer(board: &[Card], oop: &str, ip: &str, options: TrainerOptions) -> Trai
 
 #[test]
 fn combo_card_helpers() {
-    let c = |s| card_from_str(s).unwrap();
+    let c = |s: &str| s.parse::<Card>().unwrap();
     let combo = Combo::new(c("Kd"), c("2c"), 0.5);
-    assert_eq!(combo.mask(), set_from_cards(&[c("2c"), c("Kd")]));
+    assert_eq!(combo.mask(), CardSet::from_cards(&[c("2c"), c("Kd")]));
     assert_eq!(
         combo.sorted_cards(),
         Combo::new(c("2c"), c("Kd"), 1.0).sorted_cards()
     );
     assert!(combo.sorted_cards().0 < combo.sorted_cards().1);
-    assert!(combo.conflicts_with(set_from_cards(&[c("Kd"), c("Ah")])));
-    assert!(!combo.conflicts_with(set_from_cards(&[c("Kh"), c("2d")])));
-    assert!(!combo.conflicts_with(0));
+    assert!(combo.conflicts_with(CardSet::from_cards(&[c("Kd"), c("Ah")])));
+    assert!(!combo.conflicts_with(CardSet::from_cards(&[c("Kh"), c("2d")])));
+    assert!(!combo.conflicts_with(CardSet::EMPTY));
 }
 
 #[test]
@@ -156,16 +150,11 @@ fn river_buckets_on_a_flop_tree_only_bucket_river_boards() {
     // Regression: river-only bucketing used to give turn decisions zero
     // buckets, which panicked with an index out of bounds.
     let flop = board(&["2h", "7h", "9h"]);
-    let dead = set_from_cards(&flop);
+    let dead = CardSet::from_cards(&flop);
     for suit_isomorphism in [false, true] {
-        let cfg = GameConfig {
-            board: flop.clone(),
-            pot: Chips::whole(100),
-            effective_stack: Chips::whole(50),
-            bet_sizes: vec![1.0],
-            max_raises: 0,
-            suit_isomorphism,
-        };
+        let cfg = GameConfig::new(flop.clone(), Chips::whole(100), Chips::whole(50))
+            .with_bet_sizes([1.0])
+            .with_suit_isomorphism(suit_isomorphism);
         let combos = [
             Range::parse("AA,KK").unwrap().combos(dead),
             Range::parse("QQ,AKs").unwrap().combos(dead),
@@ -184,4 +173,24 @@ fn river_buckets_on_a_flop_tree_only_bucket_river_boards() {
         assert!(!assignments.is_empty());
         assert!(assignments.iter().all(|(board, _)| board.len() == 5));
     }
+}
+
+#[test]
+fn public_types_have_informative_debug_and_hash() {
+    use std::collections::HashSet;
+    let river = board(&["Ks", "Th", "7s", "4d", "2s"]);
+    let trainer = trainer(&river, "AA,KQs", "QQ,JJ", TrainerOptions::default());
+    let debug = format!("{trainer:?}");
+    for part in [
+        "Dcfr",
+        "iterations_completed: 0",
+        "num_decision_nodes",
+        "Card(Ks)",
+    ] {
+        assert!(debug.contains(part), "{debug}");
+    }
+    let players: HashSet<Player> = Player::ALL.into_iter().collect();
+    assert_eq!(players.len(), 2);
+    let options: HashSet<TrainerOptions> = [TrainerOptions::default(); 2].into_iter().collect();
+    assert_eq!(options.len(), 1);
 }

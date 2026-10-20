@@ -3,7 +3,7 @@
 //! development. Run with:
 //!   cargo run --release --example bucket_speedup
 
-use native_solver::card::{card_from_str, set_from_cards};
+use native_solver::card::{Card, CardSet};
 use native_solver::range::Range;
 use native_solver::solver::Chips;
 use native_solver::solver::{build_tree, CardAbstraction, GameConfig, Trainer};
@@ -19,9 +19,9 @@ fn run(river_buckets: Option<usize>, iterations: u32) -> (std::time::Duration, [
     // of the tree's decision nodes are river nodes eligible for bucketing.
     let board: Vec<_> = ["2h", "7c", "9d", "Jc", "4s"]
         .iter()
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .collect();
-    let dead = set_from_cards(&board);
+    let dead = CardSet::from_cards(&board);
     let oop_combos = Range::parse("JJ,TT,99,88,77,AJs,KJs,QJs,JTs,AJo,KJo,QJo,JTo")
         .unwrap()
         .combos(dead);
@@ -29,14 +29,10 @@ fn run(river_buckets: Option<usize>, iterations: u32) -> (std::time::Duration, [
         .unwrap()
         .combos(dead);
 
-    let cfg = GameConfig {
-        board: board.clone(),
-        pot: Chips::whole(100),
-        effective_stack: Chips::whole(200),
-        bet_sizes: vec![0.5, 1.0],
-        max_raises: 1,
-        suit_isomorphism: true,
-    };
+    let cfg = GameConfig::new(board.clone(), Chips::whole(100), Chips::whole(200))
+        .with_bet_sizes([0.5, 1.0])
+        .with_max_raises(1)
+        .with_suit_isomorphism(true);
     let tree = build_tree(&cfg).unwrap();
     let mut trainer = Trainer::new(
         tree,
@@ -76,7 +72,8 @@ fn main() {
     // node scales with (num_actions * num_combos) unbucketed vs
     // (num_actions * num_buckets) bucketed -- for a player's combo count
     // n and bucket count b, that's an n/b reduction per river node.
-    let dead = set_from_cards(&["2h", "7c", "9d", "Jc", "4s"].map(|s| card_from_str(s).unwrap()));
+    let dead =
+        CardSet::from_cards(&["2h", "7c", "9d", "Jc", "4s"].map(|s| s.parse::<Card>().unwrap()));
     let oop_n = Range::parse("JJ,TT,99,88,77,AJs,KJs,QJs,JTs,AJo,KJo,QJo,JTo")
         .unwrap()
         .combos(dead)

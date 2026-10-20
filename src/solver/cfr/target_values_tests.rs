@@ -77,11 +77,11 @@ impl Trainer {
                 // regret update this replaces (`own[i] - own_cfv[i]`, no
                 // reach weighting at all), so this is an exact
                 // generalization, not a behavior change, for that case.
-                let board_set = set_from_cards(board);
+                let board_set = mask_of(board);
                 let effective_reach: Vec<f64> = (0..num_own_combos)
                     .map(|i| {
                         let [h1, h2] = self.game.combos[p][i].cards;
-                        if set_contains(board_set, h1) || set_contains(board_set, h2) {
+                        if mask_has(board_set, h1) || mask_has(board_set, h2) {
                             0.0
                         } else {
                             reach[p][i]
@@ -191,8 +191,10 @@ impl Trainer {
                     (rep_cfv[0].clone(), rep_cfv[1].clone())
                 } else {
                     (
-                        self.game.relabel_cfv(0, &rep_cfv[0], suit(rep), suit(card)),
-                        self.game.relabel_cfv(1, &rep_cfv[1], suit(rep), suit(card)),
+                        self.game
+                            .relabel_cfv(0, &rep_cfv[0], rep.suit(), card.suit()),
+                        self.game
+                            .relabel_cfv(1, &rep_cfv[1], rep.suit(), card.suit()),
                     )
                 };
                 for (
@@ -292,20 +294,20 @@ fn assert_bits(a: &[Vec<f64>], b: &[Vec<f64>]) {
 fn target_values_match_frozen_traversal_bit_for_bit() {
     use crate::solver::Chips;
     use crate::solver::{build_tree, GameConfig};
-    use crate::{card_from_str, range::Range};
+    use crate::{range::Range, Card};
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
         .unwrap();
     pool.install(|| {
         for board_text in ["Ks7d2c", "Ks7s2s", "2c7c9dJd", "2c7c9dJd3h"] {
-            let board: Vec<_> = board_text.as_bytes().as_chunks::<2>().0.iter().map(|c|card_from_str(std::str::from_utf8(c).unwrap()).unwrap()).collect();
+            let board: Vec<_> = board_text.as_bytes().as_chunks::<2>().0.iter().map(|c|(std::str::from_utf8(c).unwrap()).parse::<Card>().unwrap()).collect();
             for iso in [false,true] { for bucketed in [false,true] {
                 let cfg=GameConfig{board:board.clone(),pot:Chips::whole(100),effective_stack:Chips::whole(100),bet_sizes:vec![1.0],max_raises:0,suit_isomorphism:iso};
-                let mut combos=["AA:0.5,KK,QQ", "KK:0.25,JJ,TT"].map(|s|Range::parse(s).unwrap().combos(set_from_cards(&board)));
+                let mut combos=["AA:0.5,KK,QQ", "KK:0.25,JJ,TT"].map(|s|Range::parse(s).unwrap().combos(CardSet::from_cards(&board)));
                 // Preserve suit symmetry while including zero own reach and
                 // blocked/overlapping private deals in bucket and chance paths.
-                for c in &mut combos[0] { if rank(c.cards[0])==10 && rank(c.cards[1])==10 {c.weight=0.0;} }
+                for c in &mut combos[0] { if c.cards[0].rank()==10 && c.cards[1].rank()==10 {c.weight=0.0;} }
                 for algorithm in [SolverAlgorithm::Cfr,SolverAlgorithm::CfrPlus,SolverAlgorithm::Dcfr] {
                     for schedule in [UpdateSchedule::Simultaneous,UpdateSchedule::Alternating] {
                         let make=||Trainer::new(build_tree(&cfg).unwrap(), combos.clone(), TrainerOptions { algorithm, schedule, abstraction: if bucketed {CardAbstraction{flop:Some(2),turn:Some(2),river:Some(2)}} else {CardAbstraction::default()} }).unwrap();
@@ -333,13 +335,13 @@ fn target_values_match_frozen_traversal_bit_for_bit() {
 fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
     use crate::solver::Chips;
     use crate::{
-        card_from_str,
         range::Range,
         solver::{build_tree, GameConfig},
+        Card,
     };
     use std::sync::atomic::Ordering;
     let board = ["2c", "7d", "9h", "Ks", "3c"]
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .to_vec();
     let cfg = GameConfig {
         board: board.clone(),
@@ -350,7 +352,7 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
         suit_isomorphism: false,
     };
     let combos = ["AA:0.5,QQ", "KK,JJ:0.25"]
-        .map(|s| Range::parse(s).unwrap().combos(set_from_cards(&board)));
+        .map(|s| Range::parse(s).unwrap().combos(CardSet::from_cards(&board)));
     let make = || {
         Trainer::new(
             build_tree(&cfg).unwrap(),
@@ -392,14 +394,14 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
 fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
     use crate::solver::Chips;
     use crate::{
-        card_from_str,
         solver::{build_tree, GameConfig},
+        Card,
     };
     let board = ["2h", "3d", "7c", "9s", "Jd"]
-        .map(|s| card_from_str(s).unwrap())
+        .map(|s| s.parse::<Card>().unwrap())
         .to_vec();
     let make_combo =
-        |a: &str, b: &str, w| Combo::new(card_from_str(a).unwrap(), card_from_str(b).unwrap(), w);
+        |a: &str, b: &str, w| Combo::new(a.parse::<Card>().unwrap(), b.parse::<Card>().unwrap(), w);
     // The two kings tie below AA, so requesting three buckets produces
     // [0, 0, 2]: max(bucket)+1 equals combo count despite a merged bucket.
     let combos = [
@@ -480,9 +482,9 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
 fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
     use crate::solver::Chips;
     use crate::{
-        card_from_str,
         range::Range,
         solver::{build_tree, GameConfig},
+        Card,
     };
     for threads in [1, 2, 4] {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -491,12 +493,12 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
             .unwrap();
         pool.install(|| {
             let board = ["2c", "7c", "9d", "Jd"]
-                .map(|s| card_from_str(s).unwrap())
+                .map(|s| s.parse::<Card>().unwrap())
                 .to_vec();
             let mut combos = ["AA:0.5,QQ", "JJ"]
-                .map(|s| Range::parse(s).unwrap().combos(set_from_cards(&board)));
+                .map(|s| Range::parse(s).unwrap().combos(CardSet::from_cards(&board)));
             for combo in &mut combos[0] {
-                if rank(combo.cards[0]) == rank(card_from_str("Qc").unwrap()) {
+                if combo.cards[0].rank() == "Qc".parse::<Card>().unwrap().rank() {
                     combo.weight = 0.0;
                 }
             }

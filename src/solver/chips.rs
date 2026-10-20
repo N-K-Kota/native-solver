@@ -24,8 +24,15 @@ impl Chips {
     pub const ZERO: Chips = Chips(0);
 
     /// A whole number of input chips.
+    ///
+    /// # Panics
+    /// Panics if the amount is larger than [`Chips::from_f64`] accepts
+    /// (2^53 internal units, about 9 × 10^12 chips), in every build mode.
     pub const fn whole(chips: i64) -> Chips {
-        Chips(chips * CHIP_SCALE)
+        match chips.checked_mul(CHIP_SCALE) {
+            Some(units) if units.unsigned_abs() <= 1 << 53 => Chips(units),
+            _ => panic!("Chips::whole: amount out of range"),
+        }
     }
 
     /// An amount in internal units of `1 / CHIP_SCALE` input chips, so
@@ -112,6 +119,21 @@ impl fmt::Display for Chips {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_and_units_round_trip_within_the_exact_range() {
+        assert_eq!(Chips::whole(7).units(), 7 * CHIP_SCALE);
+        assert_eq!(Chips::from_units(CHIP_SCALE), Chips::whole(1));
+        let largest = (1i64 << 53) / CHIP_SCALE;
+        assert_eq!(Chips::whole(largest).units(), largest * CHIP_SCALE);
+        assert_eq!(Chips::whole(-largest).units(), -largest * CHIP_SCALE);
+    }
+
+    #[test]
+    #[should_panic(expected = "Chips::whole: amount out of range")]
+    fn whole_rejects_amounts_beyond_the_exact_range() {
+        let _ = Chips::whole(i64::MAX / CHIP_SCALE);
+    }
 
     #[test]
     fn from_f64_accepts_thousandths_and_rejects_finer_amounts() {
