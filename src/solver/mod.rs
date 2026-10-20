@@ -11,8 +11,8 @@ pub mod quality;
 mod tree;
 
 pub use cfr::{
-    CardAbstraction, Exploitability, NodeEvaluation, Policy, PolicyError, SolverGame, Trainer,
-    TrainerError, TrainerOptions,
+    CardAbstraction, Evaluation, Exploitability, NodeEvaluation, Policy, PolicyError, SolverGame,
+    Trainer, TrainerError, TrainerOptions,
 };
 pub use chips::{Chips, CHIP_SCALE};
 pub use discount::{SolverAlgorithm, UpdateSchedule};

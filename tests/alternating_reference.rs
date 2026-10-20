@@ -104,7 +104,6 @@ fn alternating_dcfr_matches_independent_scalar_history_recurrence() {
         for schedule in [UpdateSchedule::Simultaneous, UpdateSchedule::Alternating] {
             let mut trainer = Trainer::new(
                 build_tree(&cfg).unwrap(),
-                cfg.board.clone(),
                 [combos.clone(), combos.clone()],
                 TrainerOptions {
                     algorithm: SolverAlgorithm::Dcfr,
@@ -204,7 +203,6 @@ fn alternating_suit_reduction_matches_full_runouts_and_parallel_execution() {
             }
             let mut trainer = Trainer::new(
                 tree,
-                board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm: SolverAlgorithm::Dcfr,

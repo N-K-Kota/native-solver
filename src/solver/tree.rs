@@ -271,8 +271,11 @@ fn validate_config(cfg: &GameConfig) -> Result<(), TreeError> {
     Ok(())
 }
 
-/// A built betting tree.
+/// A betting tree and the board it starts from.
+#[derive(Debug, Clone)]
 pub struct Tree {
+    /// The board the first street starts on: 3, 4, or 5 cards.
+    pub board: Vec<Card>,
     /// The first node: OOP's first decision, unless no stack is left to bet.
     pub root: Node,
     /// The number of decision nodes; their ids are `0..num_decision_nodes`.
@@ -316,6 +319,7 @@ pub fn build_tree_bounded(cfg: &GameConfig, max_decision_nodes: usize) -> Result
         &mut budget,
     )?;
     Ok(Tree {
+        board: cfg.board.clone(),
         root,
         num_decision_nodes: budget.next_id,
     })
@@ -803,9 +807,7 @@ mod tests {
             max_raises: 4,
             suit_isomorphism: false,
         };
-        let error = build_tree_bounded(&cfg, 100)
-            .err()
-            .expect("must exceed construction budget");
+        let error = build_tree_bounded(&cfg, 100).expect_err("must exceed construction budget");
         assert_eq!(error, TreeError::TooManyDecisionNodes { limit: 100 });
         assert!(error.to_string().contains("100 decision nodes"));
     }

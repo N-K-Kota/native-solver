@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Both steps validate their input and return an error instead of panicking.
     let tree = build_tree(&config)?;
-    let mut trainer = Trainer::new(tree, board, [oop, ip], TrainerOptions::default())?;
+    let mut trainer = Trainer::new(tree, [oop, ip], TrainerOptions::default())?;
     trainer.train(1000);
 
     // Average gain, in chips, that a best response could still win.

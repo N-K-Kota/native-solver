@@ -46,6 +46,7 @@ fn score(hand: Combo, b: &[Card]) -> u32 {
 // OOP may check directly to showdown or bet. IP then calls or folds.
 fn one_bet_tree(bet: f64) -> Tree {
     Tree {
+        board: river(),
         root: Node::Decision {
             id: 0,
             player: Player::Oop,
@@ -115,7 +116,7 @@ fn compare_trainer(trainer: &Trainer, initial_board: &[Card]) -> StrategyQuality
         .evaluate(|id| trainer.average_strategy(id))
         .unwrap();
     let production = trainer.exploitability();
-    let (_, raw_ev) = trainer.evaluate();
+    let raw_ev = trainer.evaluate().root_values;
     near(reference.profile_ev[0], raw_ev[0] / reference.joint_mass);
     near(reference.profile_ev[1], raw_ev[1] / reference.joint_mass);
     near(reference.best_response_ev[0], production.oop);
@@ -161,7 +162,6 @@ fn weighted_blocked_deals_have_hand_calculated_nonzero_exploitability() {
         let new = |combos| {
             Trainer::new(
                 one_bet_tree(5.0),
-                b.clone(),
                 combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -313,7 +313,6 @@ fn production_quality_matches_reference_before_and_after_training_all_algorithms
     {
         let mut trainer = Trainer::new(
             build_tree(&cfg).unwrap(),
-            b.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm,
@@ -406,7 +405,6 @@ fn turn_and_flop_all_in_match_direct_pair_runout_enumeration() {
         let combos = live(&combos, &initial);
         let trainer = Trainer::new(
             build_tree(&cfg).unwrap(),
-            initial.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -447,7 +445,6 @@ fn turn_betting_with_private_blockers_matches_all_algorithm_profiles() {
     {
         let mut trainer = Trainer::new(
             build_tree(&cfg).unwrap(),
-            b.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm,
@@ -472,7 +469,6 @@ fn expanded_bucket_policy_is_evaluated_against_unrestricted_combo_responses() {
     ];
     let mut trainer = Trainer::new(
         one_bet_tree(10.0),
-        b.clone(),
         combos,
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,

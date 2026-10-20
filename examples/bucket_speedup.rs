@@ -40,7 +40,6 @@ fn run(river_buckets: Option<usize>, iterations: u32) -> (std::time::Duration, [
     let tree = build_tree(&cfg).unwrap();
     let mut trainer = Trainer::new(
         tree,
-        board,
         [oop_combos, ip_combos],
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,

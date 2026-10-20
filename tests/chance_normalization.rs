@@ -72,7 +72,6 @@ fn check_forced_showdown(board_text: &[&str]) {
     };
     let mut trainer = Trainer::new(
         build_tree(&cfg).unwrap(),
-        board,
         [vec![hero], vec![villain]],
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,
@@ -81,7 +80,8 @@ fn check_forced_showdown(board_text: &[&str]) {
     )
     .unwrap();
     let trained = trainer.train(1);
-    let (nodes, evaluated) = trainer.evaluate();
+    let evaluation = trainer.evaluate();
+    let (nodes, evaluated) = (evaluation.nodes, evaluation.root_values);
     let exploitability = trainer.exploitability();
     println!("board={board_text:?}, legal ordered runouts={runouts}, train={trained:?}, evaluate={evaluated:?}, best_response={exploitability:?}");
     assert!(

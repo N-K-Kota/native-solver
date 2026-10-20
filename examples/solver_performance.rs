@@ -354,7 +354,6 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
     }
     let mut trainer = Trainer::new(
         tree,
-        board,
         combos,
         TrainerOptions {
             algorithm: options.algorithm,
@@ -408,7 +407,8 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
     }
     let solve_seconds = total_start.elapsed().as_secs_f64();
     let start = Instant::now();
-    let (evaluations, raw_root_cfv) = trainer.evaluate();
+    let evaluation = trainer.evaluate();
+    let (evaluations, raw_root_cfv) = (evaluation.nodes, evaluation.root_values);
     let evaluate_seconds = start.elapsed().as_secs_f64();
     let root_ev = [raw_root_cfv[0] / joint_mass, raw_root_cfv[1] / joint_mass];
     let mut strategy_checksum = 0.0;
@@ -443,7 +443,7 @@ fn run(name: &str, options: &Options) -> Result<ResultRow, String> {
             }
         }
         let evaluation = evaluations
-            .get(&node_id)
+            .get(node_id)
             .ok_or_else(|| format!("{name}: missing evaluation node {node_id}"))?;
         for (combo, &value) in evaluation.ev.iter().enumerate() {
             if !live[combo] {

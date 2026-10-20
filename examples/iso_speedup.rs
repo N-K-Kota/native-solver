@@ -33,7 +33,6 @@ fn run(suit_isomorphism: bool, iterations: u32) -> (usize, std::time::Duration, 
     let num_decision_nodes = tree.num_decision_nodes;
     let mut trainer = Trainer::new(
         tree,
-        board,
         [oop_combos, ip_combos],
         TrainerOptions {
             algorithm: SolverAlgorithm::CfrPlus,

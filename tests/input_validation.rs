@@ -42,7 +42,6 @@ fn river_trainer(combos: [Vec<Combo>; 2]) -> Result<Trainer, TrainerError> {
     let board = river();
     Trainer::new(
         build_tree(&config(board.clone())).unwrap(),
-        board,
         combos,
         TrainerOptions::default(),
     )
@@ -133,11 +132,11 @@ fn build_tree_accepts_degenerate_but_legal_configs() {
 }
 
 #[test]
-fn trainer_rejects_an_illegal_initial_board() {
-    let tree = build_tree(&config(river())).unwrap();
+fn trainer_rejects_an_illegal_board_on_a_hand_edited_tree() {
+    let mut tree = build_tree(&config(river())).unwrap();
+    tree.board = board(&["Ks", "Ks", "7s", "4d", "2s"]);
     let error = Trainer::new(
         tree,
-        board(&["Ks", "Ks", "7s", "4d", "2s"]),
         combos("AA", "QQ", &river()),
         TrainerOptions::default(),
     )
@@ -154,20 +153,19 @@ fn trainer_rejects_an_illegal_initial_board() {
 fn trainer_rejects_a_tree_built_for_another_street() {
     let turn = board(&["Ks", "Th", "7s", "4d"]);
 
-    // River tree, turn board: the showdown would happen on four cards.
-    let error = Trainer::new(
-        build_tree(&config(river())).unwrap(),
-        turn.clone(),
-        combos("AA", "QQ", &turn),
-        TrainerOptions::default(),
-    )
-    .err();
+    // River tree relabeled with a turn board: the showdown would happen on
+    // four cards.
+    let mut tree = build_tree(&config(river())).unwrap();
+    tree.board = turn.clone();
+    let error = Trainer::new(tree, combos("AA", "QQ", &turn), TrainerOptions::default()).err();
     assert_eq!(error, Some(TrainerError::TreeBoardMismatch));
 
-    // Turn tree, river board: the chance node would deal a sixth card.
+    // Turn tree relabeled with a river board: the chance node would deal a
+    // sixth card.
+    let mut tree = build_tree(&config(turn)).unwrap();
+    tree.board = river();
     let error = Trainer::new(
-        build_tree(&config(turn)).unwrap(),
-        river(),
+        tree,
         combos("AA", "QQ", &river()),
         TrainerOptions::default(),
     )
@@ -186,6 +184,7 @@ fn trainer_rejects_malformed_hand_built_trees() {
     let trees = [
         // Duplicate decision id.
         Tree {
+            board: river(),
             root: decision(
                 0,
                 vec![Action::Check, Action::Bet(Chips::whole(10))],
@@ -198,16 +197,19 @@ fn trainer_rejects_malformed_hand_built_trees() {
         },
         // Id outside 0..num_decision_nodes.
         Tree {
+            board: river(),
             root: decision(3, vec![Action::Check], vec![showdown()]),
             num_decision_nodes: 1,
         },
         // A declared id that no node uses.
         Tree {
+            board: river(),
             root: decision(0, vec![Action::Check], vec![showdown()]),
             num_decision_nodes: 2,
         },
         // More actions than children.
         Tree {
+            board: river(),
             root: decision(
                 0,
                 vec![Action::Check, Action::Bet(Chips::whole(10))],
@@ -217,6 +219,7 @@ fn trainer_rejects_malformed_hand_built_trees() {
         },
         // Negative terminal investment.
         Tree {
+            board: river(),
             root: Node::Terminal(Terminal::Showdown {
                 invested: [-1.0, 50.0],
             }),
@@ -225,13 +228,7 @@ fn trainer_rejects_malformed_hand_built_trees() {
     ];
     for tree in trees {
         let board = river();
-        let error = Trainer::new(
-            tree,
-            board.clone(),
-            combos("AA", "QQ", &board),
-            TrainerOptions::default(),
-        )
-        .err();
+        let error = Trainer::new(tree, combos("AA", "QQ", &board), TrainerOptions::default()).err();
         assert!(
             matches!(error, Some(TrainerError::InvalidTree { .. })),
             "{error:?}"
@@ -247,16 +244,11 @@ fn trainer_rejects_malformed_hand_built_trees() {
         .map(|c| (vec![c], showdown()))
         .collect();
     let tree = Tree {
+        board: turn.clone(),
         root: Node::Chance { children },
         num_decision_nodes: 0,
     };
-    let error = Trainer::new(
-        tree,
-        turn.clone(),
-        combos("AA", "QQ", &turn),
-        TrainerOptions::default(),
-    )
-    .err();
+    let error = Trainer::new(tree, combos("AA", "QQ", &turn), TrainerOptions::default()).err();
     assert!(
         matches!(error, Some(TrainerError::InvalidTree { .. })),
         "{error:?}"
@@ -361,7 +353,6 @@ fn trainer_rejects_zero_bucket_abstraction() {
     let board = river();
     let error = Trainer::new(
         build_tree(&config(board.clone())).unwrap(),
-        board.clone(),
         combos("AA,KQs", "QQ,JJ", &board),
         TrainerOptions {
             abstraction: CardAbstraction {
@@ -386,7 +377,6 @@ fn trainer_rejects_asymmetric_ranges_on_suit_reduced_trees() {
     oop[0].weight = 0.25;
     let error = Trainer::new(
         build_tree(&cfg).unwrap(),
-        turn,
         [oop, ip],
         TrainerOptions::default(),
     )
@@ -427,7 +417,6 @@ fn flop_and_turn_buckets_need_suit_closed_ranges() {
         let ip = combos("AA", "QQ", &flop)[1].clone();
         Trainer::new(
             build_tree(&cfg).unwrap(),
-            flop.clone(),
             [oop, ip],
             TrainerOptions {
                 abstraction,
@@ -482,6 +471,7 @@ fn trainer_rejects_chance_groups_that_are_not_suit_swaps() {
                 .map(|card| (vec![card], showdown())),
         );
         Tree {
+            board: turn.clone(),
             root: Node::Chance { children },
             num_decision_nodes: 0,
         }
@@ -489,7 +479,6 @@ fn trainer_rejects_chance_groups_that_are_not_suit_swaps() {
     let new = |tree| {
         Trainer::new(
             tree,
-            turn.clone(),
             combos("77,88,AKs", "77,88,AKs", &turn),
             TrainerOptions::default(),
         )
@@ -518,13 +507,13 @@ fn trainer_rejects_chance_groups_that_are_not_suit_swaps() {
                 .map(|card| (vec![card], showdown())),
         );
         Tree {
+            board: flop.clone(),
             root: Node::Chance { children },
             num_decision_nodes: 0,
         }
     };
     let error = Trainer::new(
         flop_tree,
-        flop.clone(),
         combos("77,88,AKs", "77,88,AKs", &flop),
         TrainerOptions::default(),
     )

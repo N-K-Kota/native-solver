@@ -45,7 +45,7 @@ combo.
 | API | What it returns |
 | --- | --- |
 | `Trainer::train` | Root `[OOP, IP]` raw range-weighted values under the last iteration's current strategy. A progress signal, not an EV. |
-| `evaluate().1` | Root `[OOP, IP]` raw range-weighted values under the average strategy. |
+| `evaluate().root_values` | Root `[OOP, IP]` raw range-weighted values under the average strategy. |
 | `NodeEvaluation::ev` | Per combo: the raw CFV divided by the opponent's compatible reach, which is the node EV in chips. `0.0` when no opponent combo is compatible. |
 | `NodeEvaluation::equity` | Per combo, complete boards only: showdown win probability against the opponent's compatible, reach-weighted range. Ties count half; `0.5` when nothing is compatible. |
 

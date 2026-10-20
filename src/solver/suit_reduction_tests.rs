@@ -153,7 +153,6 @@ fn trainer(cfg: &GameConfig, cs: &[Vec<Combo>; 2], iso: bool) -> Trainer {
     cfg.suit_isomorphism = iso;
     Trainer::new(
         build_tree_bounded(&cfg, 100_000).unwrap(),
-        cfg.board,
         cs.clone(),
         TrainerOptions {
             algorithm: SolverAlgorithm::Dcfr,
@@ -172,7 +171,7 @@ fn audit(oracle: &ReferenceEvaluator<'_>, full: &Node, t: &Trainer, expected_com
     }
     let q = oracle.evaluate(|id| policy[&id].clone()).unwrap();
     let actual = t.exploitability();
-    let ev = t.evaluate().1.map(|v| v / q.joint_mass);
+    let ev = t.evaluate().root_values.map(|v| v / q.joint_mass);
     for (name, a, b) in [
         ("OOP EV", ev[0], q.profile_ev[0]),
         ("IP EV", ev[1], q.profile_ev[1]),
@@ -459,7 +458,6 @@ fn reduced_policies_are_exactly_symmetric_across_algorithms_and_buckets() {
                     ] {
                         let mut t = Trainer::new(
                             build_tree_bounded(&cfg, 100_000).unwrap(),
-                            cfg.board.clone(),
                             cs.clone(),
                             TrainerOptions {
                                 algorithm,
@@ -485,7 +483,6 @@ fn reduced_tree_rejects_asymmetric_initial_weights() {
     let new = |cfg: &GameConfig| {
         Trainer::new(
             build_tree_bounded(cfg, 100_000).unwrap(),
-            cfg.board.clone(),
             cs.clone(),
             TrainerOptions::default(),
         )

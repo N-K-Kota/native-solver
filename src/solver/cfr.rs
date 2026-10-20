@@ -151,10 +151,10 @@ impl std::error::Error for PolicyError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrainerError {
-    /// The initial board is not a legal flop, turn, or river.
+    /// The tree's board is not a legal flop, turn, or river.
     Board(BoardError),
-    /// The tree does not continue from the initial board: it reaches a
-    /// showdown before the river, or deals a card past the river.
+    /// The tree's nodes do not continue from its board: they reach a
+    /// showdown before the river, or deal a card past the river.
     TreeBoardMismatch,
     /// The tree is malformed: decision ids are not exactly
     /// `0..num_decision_nodes`, actions and children differ in length, a
@@ -267,10 +267,10 @@ impl From<BoardError> for TrainerError {
 /// Rejects inputs that `Trainer` cannot solve as a legal game.
 fn validate_trainer_inputs(
     tree: &super::tree::Tree,
-    initial_board: &[Card],
     combos: &[Vec<Combo>; 2],
     abstraction: CardAbstraction,
 ) -> Result<(), TrainerError> {
+    let initial_board = tree.board.as_slice();
     validate_board(initial_board)?;
     let mut seen_ids = vec![false; tree.num_decision_nodes];
     validate_tree(&tree.root, &mut initial_board.to_vec(), &mut seen_ids)?;
@@ -515,6 +515,18 @@ pub struct CardAbstraction {
     pub river: Option<usize>,
 }
 
+/// [`SolverGame::evaluate`]'s result: per-node values under a policy.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Evaluation {
+    /// One entry per decision node, indexed by node id.
+    pub nodes: Vec<NodeEvaluation>,
+    /// Root `[OOP, IP]` raw range-weighted values: zero-sum like
+    /// `Trainer::train`'s return, but under the evaluated policy. Not EVs;
+    /// see `docs/conventions.md`.
+    pub root_values: [f64; 2],
+}
+
 /// `SolverGame::evaluate`'s result for one decision node — per combo, for
 /// the acting player, under the trained *average* strategy (not
 /// `train()`'s informal last-iteration current-strategy value): `ev` is
@@ -565,7 +577,7 @@ pub struct Exploitability {
 }
 
 impl Trainer {
-    /// Builds a trainer for `tree`, starting on `initial_board`, with each
+    /// Builds a trainer for `tree`, starting on `tree.board`, with each
     /// player's combos (the order is kept and
     /// is the combo axis of every per-combo result). Takes ownership of
     /// `tree` so a `Trainer` can outlive the scope that built it.
@@ -581,28 +593,27 @@ impl Trainer {
     /// Canonical `Range` inputs satisfy this after initial-board removal.
     ///
     /// # Errors
-    /// Returns a [`TrainerError`] if the board is illegal, the tree does not
-    /// continue from it or is malformed, a range is empty or holds invalid,
+    /// Returns a [`TrainerError`] if the tree's board is illegal, the tree
+    /// does not continue from it or is malformed, a range is empty or holds invalid,
     /// repeated, or board-blocked combos, no deal is possible, an abstraction
     /// asks for zero buckets, or a suit-reduced tree gets an asymmetric range.
     pub fn new(
         tree: super::tree::Tree,
-        initial_board: Vec<Card>,
         combos: [Vec<Combo>; 2],
         options: TrainerOptions,
     ) -> Result<Self, TrainerError> {
-        validate_trainer_inputs(&tree, &initial_board, &combos, options.abstraction)?;
-        Ok(Self::new_unchecked(tree, initial_board, combos, options))
+        validate_trainer_inputs(&tree, &combos, options.abstraction)?;
+        Ok(Self::new_unchecked(tree, combos, options))
     }
 
     /// `new` without input validation, for tests that drive the terminal
     /// kernels with deliberately degenerate ranges.
     fn new_unchecked(
         tree: super::tree::Tree,
-        initial_board: Vec<Card>,
         combos: [Vec<Combo>; 2],
         options: TrainerOptions,
     ) -> Self {
+        let initial_board = tree.board.clone();
         let TrainerOptions {
             algorithm,
             schedule: update_schedule,
@@ -841,7 +852,7 @@ impl Trainer {
     }
 
     /// `SolverGame::evaluate` under the current average strategy.
-    pub fn evaluate(&self) -> (HashMap<usize, NodeEvaluation>, [f64; 2]) {
+    pub fn evaluate(&self) -> Evaluation {
         self.game.evaluate(&self.policy())
     }
 
@@ -1185,16 +1196,15 @@ impl SolverGame {
     /// the immutable game and `policy`, so it runs concurrently with training
     /// and always describes exactly the iteration `policy` was taken at.
     ///
-    /// Returns every visited decision node's `NodeEvaluation`, keyed by
-    /// node id — computing this for a single node still requires walking
-    /// its entire subtree (unlike `average_strategy`, which is a direct
-    /// per-node lookup), so callers that need more than one node's
-    /// evaluation should call this once and read from the map, not call it
-    /// per node — plus the root's own range-weighted `[OOP, IP]` value
-    /// pair (same shape and same zero-sum property as `train()`'s return,
-    /// but under the average strategy rather than the last training
-    /// iteration's current strategy).
-    pub fn evaluate(&self, policy: &Policy) -> (HashMap<usize, NodeEvaluation>, [f64; 2]) {
+    /// Returns every decision node's `NodeEvaluation`, indexed by node id —
+    /// computing this for a single node still requires walking its entire
+    /// subtree (unlike `average_strategy`, which is a direct per-node
+    /// lookup), so callers that need more than one node's evaluation should
+    /// call this once and index the result, not call it per node — plus the
+    /// root's own range-weighted `[OOP, IP]` value pair (same shape and
+    /// same zero-sum property as `train()`'s return, but under the given
+    /// policy rather than the last training iteration's current strategy).
+    pub fn evaluate(&self, policy: &Policy) -> Evaluation {
         let mut out = HashMap::new();
         let board = self.initial_board.clone();
         let empty_eval = [Vec::new(), Vec::new()];
@@ -1219,7 +1229,14 @@ impl SolverGame {
             .zip(&self.combos[1])
             .map(|(v, c)| v * c.weight)
             .sum();
-        (out, [ev0, ev1])
+        // `evaluate_node` visits every decision node exactly once.
+        let nodes = (0..self.node_meta.len())
+            .map(|id| out.remove(&id).expect("every decision node is evaluated"))
+            .collect();
+        Evaluation {
+            nodes,
+            root_values: [ev0, ev1],
+        }
     }
 
     /// The standard CFR convergence metric: how much either player could
@@ -1303,6 +1320,11 @@ impl SolverGame {
     /// by walking its structure.
     pub fn tree(&self) -> &Node {
         &self.tree.root
+    }
+
+    /// The board the tree starts from (`Tree::board`).
+    pub fn board(&self) -> &[Card] {
+        &self.tree.board
     }
 
     /// The community cards dealt so far at decision node `node_id` (e.g.
@@ -2390,6 +2412,7 @@ mod tests {
             vec![Combo::new(c("Kh"), c("Kd"), 1.0)],
         ];
         let tree = Tree {
+            board: board.clone(),
             root: Node::Decision {
                 id: 0,
                 player: Player::Oop,
@@ -2409,7 +2432,6 @@ mod tests {
         };
         let mut trainer = Trainer::new(
             tree,
-            board,
             combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::Dcfr,
@@ -2481,7 +2503,6 @@ mod tests {
                 let make = || {
                     Trainer::new(
                         build_tree(&cfg).unwrap(),
-                        cfg.board.clone(),
                         combos.clone(),
                         TrainerOptions {
                             algorithm,
@@ -2522,7 +2543,6 @@ mod tests {
     struct Scenario {
         tree: super::super::tree::Tree,
         trainer_combos: [Vec<Combo>; 2],
-        board: Vec<Card>,
         pot: f64,
         bet: f64,
     }
@@ -2551,7 +2571,6 @@ mod tests {
         Scenario {
             tree,
             trainer_combos: [oop_combos, ip_combos],
-            board,
             pot,
             bet,
         }
@@ -2566,7 +2585,6 @@ mod tests {
         let scenario = build_scenario();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2613,7 +2631,6 @@ mod tests {
         let combos0 = scenario.trainer_combos[0].clone();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2706,7 +2723,6 @@ mod tests {
     struct MultiStreetScenario {
         tree: super::super::tree::Tree,
         trainer_combos: [Vec<Combo>; 2],
-        board: Vec<Card>,
         pot: f64,
         bet: f64,
     }
@@ -2748,7 +2764,6 @@ mod tests {
         MultiStreetScenario {
             tree,
             trainer_combos,
-            board,
             pot,
             bet,
         }
@@ -2763,7 +2778,6 @@ mod tests {
         let scenario = build_multi_street_scenario();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2799,7 +2813,6 @@ mod tests {
         let combos0 = scenario.trainer_combos[0].clone();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2923,7 +2936,6 @@ mod tests {
         MultiStreetScenario {
             tree,
             trainer_combos,
-            board,
             pot,
             bet,
         }
@@ -2987,7 +2999,6 @@ mod tests {
         let iterations = 3_000;
         let mut reduced_trainer = Trainer::new(
             reduced.tree,
-            reduced.board,
             reduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -2998,7 +3009,6 @@ mod tests {
         reduced_trainer.train(iterations);
         let mut unreduced_trainer = Trainer::new(
             unreduced.tree,
-            unreduced.board,
             unreduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3132,7 +3142,6 @@ mod tests {
         let iterations = 3_000;
         let mut trainer_none = Trainer::new(
             tree_none,
-            board.clone(),
             [oop_combos.clone(), ip_combos.clone()],
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3144,7 +3153,6 @@ mod tests {
         // 100 exceeds both players' combo counts here, so this is a bijection on both sides.
         let mut trainer_bucketed = Trainer::new(
             tree_bucketed,
-            board,
             [oop_combos, ip_combos],
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3227,7 +3235,6 @@ mod tests {
         let combos0 = oop_combos.clone();
         let mut trainer = Trainer::new(
             tree,
-            board,
             [oop_combos, ip_combos],
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3360,7 +3367,6 @@ mod tests {
     struct FlopScenario {
         tree: super::super::tree::Tree,
         trainer_combos: [Vec<Combo>; 2],
-        board: Vec<Card>,
     }
 
     fn flop_scenario_combos() -> [Vec<Combo>; 2] {
@@ -3384,7 +3390,6 @@ mod tests {
         FlopScenario {
             tree,
             trainer_combos,
-            board,
         }
     }
 
@@ -3406,7 +3411,6 @@ mod tests {
         let iterations = 1_500;
         let mut trainer_none = Trainer::new(
             scenario_none.tree,
-            scenario_none.board,
             scenario_none.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3417,7 +3421,6 @@ mod tests {
         trainer_none.train(iterations);
         let mut trainer_bucketed = Trainer::new(
             scenario_bucketed.tree,
-            scenario_bucketed.board,
             scenario_bucketed.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3472,7 +3475,6 @@ mod tests {
         let iterations = 300;
         let mut trainer_none = Trainer::new(
             scenario_none.tree,
-            scenario_none.board,
             scenario_none.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3483,7 +3485,6 @@ mod tests {
         trainer_none.train(iterations);
         let mut trainer_bucketed = Trainer::new(
             scenario_bucketed.tree,
-            scenario_bucketed.board,
             scenario_bucketed.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3539,7 +3540,6 @@ mod tests {
 
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3634,7 +3634,6 @@ mod tests {
             let scenario = build_flop_scenario(combos);
             let mut trainer = Trainer::new(
                 scenario.tree,
-                scenario.board,
                 scenario.trainer_combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -3662,7 +3661,6 @@ mod tests {
         let scenario = build_scenario();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3671,7 +3669,7 @@ mod tests {
         )
         .unwrap();
         trainer.train(20_000);
-        let (_, [ev0, ev1]) = trainer.evaluate();
+        let [ev0, ev1] = trainer.evaluate().root_values;
         assert!(
             (ev0 + ev1).abs() < 1.0,
             "expected zero-sum root EV under the average strategy, got ev0={ev0}, ev1={ev1}"
@@ -3694,7 +3692,6 @@ mod tests {
         let combos0 = scenario.trainer_combos[0].clone();
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3704,8 +3701,8 @@ mod tests {
         .unwrap();
         trainer.train(5_000);
 
-        let (eval, _) = trainer.evaluate();
-        let root_eval = eval.get(&root_id).expect("root should have an evaluation");
+        let eval = trainer.evaluate().nodes;
+        let root_eval = eval.get(root_id).expect("root should have an evaluation");
         let equity = root_eval
             .equity
             .as_ref()
@@ -3747,7 +3744,6 @@ mod tests {
         };
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3757,8 +3753,8 @@ mod tests {
         .unwrap();
         trainer.train(500);
 
-        let (eval, _) = trainer.evaluate();
-        let root_eval = eval.get(&root_id).expect("root should have an evaluation");
+        let eval = trainer.evaluate().nodes;
+        let root_eval = eval.get(root_id).expect("root should have an evaluation");
         assert!(
             root_eval.equity.is_none(),
             "expected no equity figure at a pre-river (incomplete board) node"
@@ -3799,7 +3795,6 @@ mod tests {
 
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3808,10 +3803,10 @@ mod tests {
         )
         .unwrap();
         trainer.train(20_000);
-        let (eval, _) = trainer.evaluate();
+        let eval = trainer.evaluate().nodes;
 
         let bound = pot + bet;
-        let root_eval = eval.get(&root_id).expect("root should have an evaluation");
+        let root_eval = eval.get(root_id).expect("root should have an evaluation");
         for &ev in &root_eval.ev {
             assert!(
                 ev.abs() <= bound + 1e-6,
@@ -3819,7 +3814,7 @@ mod tests {
             );
         }
         let ip_eval = eval
-            .get(&ip_facing_bet_id)
+            .get(ip_facing_bet_id)
             .expect("IP-facing-bet node should have an evaluation");
         for &ev in &ip_eval.ev {
             assert!(
@@ -3884,7 +3879,6 @@ mod tests {
         let make = || {
             Trainer::new(
                 build_tree(&cfg).unwrap(),
-                board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm: SolverAlgorithm::Dcfr,
@@ -3894,13 +3888,13 @@ mod tests {
             )
             .unwrap()
         };
-        let bits = |(nodes, root): (HashMap<usize, NodeEvaluation>, [f64; 2])| {
-            let mut nodes: Vec<_> = nodes
-                .into_iter()
-                .map(|(id, e)| (id, e.ev.iter().map(|v| v.to_bits()).collect::<Vec<_>>()))
+        let bits = |evaluation: Evaluation| {
+            let nodes: Vec<Vec<u64>> = evaluation
+                .nodes
+                .iter()
+                .map(|e| e.ev.iter().map(|v| v.to_bits()).collect())
                 .collect();
-            nodes.sort();
-            (nodes, root.map(f64::to_bits))
+            (nodes, evaluation.root_values.map(f64::to_bits))
         };
 
         let mut trainer = make();
@@ -3970,7 +3964,6 @@ mod tests {
         let few = build_scenario();
         let mut few_trainer = Trainer::new(
             few.tree,
-            few.board,
             few.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -3984,7 +3977,6 @@ mod tests {
         let many = build_scenario();
         let mut many_trainer = Trainer::new(
             many.tree,
-            many.board,
             many.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4019,7 +4011,6 @@ mod tests {
         let pot = scenario.pot;
         let mut trainer = Trainer::new(
             scenario.tree,
-            scenario.board,
             scenario.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4080,6 +4071,7 @@ mod tests {
             }
         }
         let tree = Tree {
+            board: board.clone(),
             root: Node::Decision {
                 id: 0,
                 player: Player::Oop,
@@ -4110,7 +4102,6 @@ mod tests {
         // and impossible deals, which the kernels must still ignore.
         Trainer::new_unchecked(
             tree,
-            board,
             combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4231,7 +4222,6 @@ mod tests {
         let iterations = 3_000;
         let mut reduced_trainer = Trainer::new(
             reduced.tree,
-            reduced.board,
             reduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4242,7 +4232,6 @@ mod tests {
         reduced_trainer.train(iterations);
         let mut unreduced_trainer = Trainer::new(
             unreduced.tree,
-            unreduced.board,
             unreduced.trainer_combos,
             TrainerOptions {
                 algorithm: SolverAlgorithm::CfrPlus,
@@ -4312,6 +4301,7 @@ mod terminal_regression_tests {
                 [full.clone(), Vec::new()],
             ] {
                 let tree = Tree {
+                    board: board.clone(),
                     root: Node::Terminal(Terminal::Showdown {
                         invested: [37.0, 121.0],
                     }),
@@ -4321,7 +4311,6 @@ mod terminal_regression_tests {
                 // kernels' degenerate paths.
                 let trainer = Trainer::new_unchecked(
                     tree,
-                    board.clone(),
                     combos,
                     TrainerOptions {
                         algorithm: SolverAlgorithm::CfrPlus,
@@ -4424,7 +4413,6 @@ mod terminal_regression_tests {
             };
             let mut actual = Trainer::new(
                 build_tree(&cfg).unwrap(),
-                board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -4434,7 +4422,6 @@ mod terminal_regression_tests {
             .unwrap();
             let mut reference = Trainer::new(
                 build_tree(&cfg).unwrap(),
-                board,
                 combos,
                 TrainerOptions {
                     algorithm: SolverAlgorithm::CfrPlus,
@@ -4466,10 +4453,10 @@ mod terminal_regression_tests {
             close(a.oop, b.oop);
             close(a.ip, b.ip);
             close(a.total, b.total);
-            let (a, _) = actual.evaluate();
-            let (b, _) = reference.evaluate();
-            for (id, eval) in a {
-                for (x, y) in eval.ev.iter().zip(&b[&id].ev) {
+            let a = actual.evaluate().nodes;
+            let b = reference.evaluate().nodes;
+            for (eval, other) in a.iter().zip(&b) {
+                for (x, y) in eval.ev.iter().zip(&other.ev) {
                     close(*x, *y);
                 }
             }

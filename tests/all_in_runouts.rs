@@ -160,7 +160,6 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                 ];
                 let mut new = Trainer::new(
                     tree,
-                    board.clone(),
                     combos.clone(),
                     TrainerOptions {
                         algorithm,
@@ -171,7 +170,6 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                 .unwrap();
                 let mut old = Trainer::new(
                     legacy,
-                    board.clone(),
                     combos.clone(),
                     TrainerOptions {
                         algorithm,
@@ -188,7 +186,7 @@ fn all_in_runouts_preserve_strategy_values_and_reference_quality() {
                     [q.oop, q.ip, q.total],
                     [previous.oop, previous.ip, previous.total]
                 );
-                assert_eq!(new.evaluate().1, old.evaluate().1);
+                assert_eq!(new.evaluate().root_values, old.evaluate().root_values);
                 if !iso {
                     let reference = ReferenceEvaluator::new(
                         new.game().tree(),

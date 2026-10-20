@@ -24,7 +24,7 @@ fn trainer(board: &[Card], oop: &str, ip: &str, options: TrainerOptions) -> Trai
         Range::parse(oop).unwrap().combos(dead),
         Range::parse(ip).unwrap().combos(dead),
     ];
-    Trainer::new(build_tree(&cfg).unwrap(), board.to_vec(), combos, options).unwrap()
+    Trainer::new(build_tree(&cfg).unwrap(), combos, options).unwrap()
 }
 
 #[test]
@@ -177,8 +177,7 @@ fn river_buckets_on_a_flop_tree_only_bucket_river_boards() {
             },
             ..TrainerOptions::default()
         };
-        let mut trainer =
-            Trainer::new(build_tree(&cfg).unwrap(), flop.clone(), combos, options).unwrap();
+        let mut trainer = Trainer::new(build_tree(&cfg).unwrap(), combos, options).unwrap();
         trainer.train(2);
         assert!(trainer.exploitability().total.is_finite());
         let assignments = trainer.game().bucket_assignments();

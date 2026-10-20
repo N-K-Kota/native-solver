@@ -43,7 +43,6 @@ fn scheduled_fixture(
     (
         Trainer::new(
             tree,
-            board,
             combos,
             TrainerOptions {
                 algorithm,
@@ -181,7 +180,7 @@ fn chunked_training_is_bit_identical_to_one_batch() {
                     "{algorithm:?}, bucketed={bucketed}, node={id}"
                 );
             }
-            assert_eq!(chunks.evaluate().1, whole.evaluate().1);
+            assert_eq!(chunks.evaluate().root_values, whole.evaluate().root_values);
             assert_eq!(chunks.exploitability().total, whole.exploitability().total);
             // Equal averages alone do not guarantee equal hidden regrets.
             assert_eq!(chunks.train(3), whole.train(3));
@@ -228,7 +227,6 @@ fn legacy_boolean_constructor_keeps_its_algorithm_and_trajectory() {
     ] {
         let mut legacy = Trainer::new(
             build_tree(&config).unwrap(),
-            config.board.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm: if plus {
@@ -242,7 +240,6 @@ fn legacy_boolean_constructor_keeps_its_algorithm_and_trajectory() {
         .unwrap();
         let mut explicit = Trainer::new(
             build_tree(&config).unwrap(),
-            config.board.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm,
@@ -296,7 +293,6 @@ fn every_algorithm_converges_to_known_kuhn_value_and_policy() {
             let facing_bet = *facing_bet;
             let mut trainer = Trainer::new(
                 tree,
-                config.board.clone(),
                 combos.clone(),
                 TrainerOptions {
                     algorithm,
@@ -308,7 +304,7 @@ fn every_algorithm_converges_to_known_kuhn_value_and_policy() {
             trainer.train(20_000);
             // evaluate() returns raw joint-range weighted totals. There are
             // six unit-weight legal deals, so divide by six for chips/deal.
-            let ev = trainer.evaluate().1[0] / 6.0;
+            let ev = trainer.evaluate().root_values[0] / 6.0;
             let exploitability = trainer.exploitability().total;
             eprintln!("{algorithm:?}: value={ev}, exploitability={exploitability}");
             assert!((ev + 1.0 / 18.0).abs() < 0.001, "{algorithm:?}: EV={ev}");
@@ -371,7 +367,7 @@ fn bucket_average_ignores_combos_blocked_by_the_dealt_card() {
         },
         ..TrainerOptions::default()
     };
-    let mut trainer = Trainer::new(tree, turn.clone(), combos, options).unwrap();
+    let mut trainer = Trainer::new(tree, combos, options).unwrap();
     trainer.train(50);
 
     fn river_decisions(node: &Node, out: &mut Vec<usize>) {

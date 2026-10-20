@@ -308,7 +308,7 @@ fn target_values_match_frozen_traversal_bit_for_bit() {
                 for c in &mut combos[0] { if rank(c.cards[0])==10 && rank(c.cards[1])==10 {c.weight=0.0;} }
                 for algorithm in [SolverAlgorithm::Cfr,SolverAlgorithm::CfrPlus,SolverAlgorithm::Dcfr] {
                     for schedule in [UpdateSchedule::Simultaneous,UpdateSchedule::Alternating] {
-                        let make=||Trainer::new(build_tree(&cfg).unwrap(), board.clone(), combos.clone(), TrainerOptions { algorithm, schedule, abstraction: if bucketed {CardAbstraction{flop:Some(2),turn:Some(2),river:Some(2)}} else {CardAbstraction::default()} }).unwrap();
+                        let make=||Trainer::new(build_tree(&cfg).unwrap(), combos.clone(), TrainerOptions { algorithm, schedule, abstraction: if bucketed {CardAbstraction{flop:Some(2),turn:Some(2),river:Some(2)}} else {CardAbstraction::default()} }).unwrap();
                         let mut candidate=make();let mut legacy=make();
                         for batch in [0,1,3] {
                             assert_eq!(candidate.train(batch).map(f64::to_bits),legacy.legacy_train(batch).map(f64::to_bits),"{board_text} iso={iso} bucketed={bucketed} {algorithm:?} {schedule:?}");
@@ -320,7 +320,7 @@ fn target_values_match_frozen_traversal_bit_for_bit() {
                             }
                             let a=candidate.exploitability();let b=legacy.exploitability();
                             assert_eq!([a.oop,a.ip,a.total].map(f64::to_bits),[b.oop,b.ip,b.total].map(f64::to_bits));
-                            assert_eq!(candidate.evaluate().1.map(f64::to_bits),legacy.evaluate().1.map(f64::to_bits));
+                            assert_eq!(candidate.evaluate().root_values.map(f64::to_bits),legacy.evaluate().root_values.map(f64::to_bits));
                         }
                     }
                 }
@@ -354,7 +354,6 @@ fn target_values_skip_unused_terminal_work_but_preserve_final_return() {
     let make = || {
         Trainer::new(
             build_tree(&cfg).unwrap(),
-            board.clone(),
             combos.clone(),
             TrainerOptions {
                 algorithm: SolverAlgorithm::Dcfr,
@@ -433,7 +432,6 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
                 let make = || {
                     Trainer::new(
                         build_tree(&cfg).unwrap(),
-                        board.clone(),
                         combos.clone(),
                         TrainerOptions {
                             algorithm,
@@ -469,8 +467,8 @@ fn direct_combo_updates_preserve_long_batches_and_sparse_tied_buckets() {
                         legacy.exploitability().total.to_bits()
                     );
                     assert_eq!(
-                        candidate.evaluate().1.map(f64::to_bits),
-                        legacy.evaluate().1.map(f64::to_bits)
+                        candidate.evaluate().root_values.map(f64::to_bits),
+                        legacy.evaluate().root_values.map(f64::to_bits)
                     );
                 }
             }
@@ -523,7 +521,6 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
                             let make = || {
                                 Trainer::new(
                                     build_tree(&cfg).unwrap(),
-                                    board.clone(),
                                     combos.clone(),
                                     TrainerOptions {
                                         algorithm,
@@ -559,8 +556,8 @@ fn borrowed_reach_matches_owned_traversal_on_unequal_ranges_and_threads() {
                                     legacy.exploitability().total.to_bits()
                                 );
                                 assert_eq!(
-                                    candidate.evaluate().1.map(f64::to_bits),
-                                    legacy.evaluate().1.map(f64::to_bits)
+                                    candidate.evaluate().root_values.map(f64::to_bits),
+                                    legacy.evaluate().root_values.map(f64::to_bits)
                                 );
                             }
                         }
