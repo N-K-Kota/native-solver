@@ -390,7 +390,6 @@ pub fn evaluate_7(cards: [Card; 7]) -> HandStrength {
     HandStrength(score_7(cards))
 }
 
-/// [`evaluate_7`] as a raw score, for the solver's hot paths.
 /// The highest set bit of a non-empty 13-bit rank mask, as a rank.
 fn top_rank(mask: u16) -> u32 {
     15 - mask.leading_zeros()
@@ -418,8 +417,10 @@ fn best_straight_high(mask: u16) -> Option<u32> {
     (runs != 0).then(|| top_rank(runs) + 3)
 }
 
-/// Scores the best five-card hand out of seven directly from rank and suit
-/// counts. Equal to the maximum of [`score_5`] over all 21 five-card subsets.
+/// [`evaluate_7`] as a raw score, for the solver's hot paths.
+///
+/// Reads the best five-card hand directly from rank and suit counts. Equal to
+/// the maximum of [`score_5`] over all 21 five-card subsets.
 pub(crate) fn score_7(cards: [Card; 7]) -> u32 {
     let mut suits = [0u16; 4];
     // Ranks held at least once, twice, three and four times.

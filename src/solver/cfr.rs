@@ -16,10 +16,10 @@
 //!
 //! Sibling subtrees (a decision node's actions, a chance node's dealt
 //! cards) are independent recursions given the strategy at this node, so
-//! they're evaluated in parallel with `rayon`. Each decision node's
-//! regret/strategy tables live behind a `Mutex` to make that safe — actual
-//! contention is near zero, since a node is touched only by the one or two
-//! threads whose branch passes through it.
+//! large ones are evaluated in parallel with `rayon`; small ones run
+//! sequentially in one scratch buffer (see the `engine` module). Each
+//! decision node's regret/strategy tables live behind a `Mutex` to make
+//! that safe. It is never contended: one traversal reaches a node once.
 
 use super::discount::{IterationUpdate, SolverAlgorithm, UpdateSchedule};
 use super::terminal::{BoardOrder, TerminalIndex};
@@ -29,6 +29,7 @@ use crate::card::CardSet;
 use crate::card::{bit, mask_has, mask_of, Card};
 use crate::eval::score_7;
 use crate::range::Combo;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -923,11 +924,19 @@ impl Trainer {
 
     /// Snapshot of the average strategy at this iteration boundary.
     pub fn policy(&self) -> Policy {
-        Policy {
-            rows: (0..self.node_data.len())
+        let nodes = self.node_data.len();
+        let rows = if nodes < 1024 || rayon::current_num_threads() <= 1 {
+            (0..nodes)
                 .map(|id| self.average_bucket_strategy(id))
-                .collect(),
-        }
+                .collect()
+        } else {
+            (0..nodes)
+                .into_par_iter()
+                .with_min_len(256)
+                .map(|id| self.average_bucket_strategy(id))
+                .collect()
+        };
+        Policy { rows }
     }
 
     /// [`SolverGame::evaluate`] under the current average strategy.
@@ -952,24 +961,28 @@ impl Trainer {
 
     /// Normalized strategy sums in bucket coordinates, suit-symmetrized.
     fn average_bucket_strategy(&self, node_id: usize) -> Vec<Vec<f64>> {
-        let (player, board) = &self.game.node_meta[node_id];
-        let (num_buckets, _) = self.game.combo_buckets(*player, board);
         let data = self.node_data[node_id].lock().unwrap();
-        let num_actions = data.regret_sum.len();
-        let mut bucket_strategy: Vec<Vec<f64>> = (0..num_actions)
-            .map(|a| {
-                (0..num_buckets)
-                    .map(|b| {
-                        let total: f64 = (0..num_actions).map(|a2| data.strategy_sum[a2][b]).sum();
-                        if total > 0.0 {
-                            data.strategy_sum[a][b] / total
-                        } else {
-                            1.0 / num_actions as f64
-                        }
-                    })
+        let num_actions = data.strategy_sum.len();
+        let num_buckets = data.strategy_sum.first().map_or(0, Vec::len);
+        // One total per bucket, added in action order.
+        let mut totals = vec![0.0; num_buckets];
+        for row in &data.strategy_sum {
+            for (total, &sum) in totals.iter_mut().zip(row) {
+                *total += sum;
+            }
+        }
+        let uniform = 1.0 / num_actions as f64;
+        let mut bucket_strategy: Vec<Vec<f64>> = data
+            .strategy_sum
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(&totals)
+                    .map(|(&sum, &total)| if total > 0.0 { sum / total } else { uniform })
                     .collect()
             })
             .collect();
+        drop(data);
         self.game.symmetrize_strategy(node_id, &mut bucket_strategy);
         bucket_strategy
     }

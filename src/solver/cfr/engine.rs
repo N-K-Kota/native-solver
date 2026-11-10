@@ -28,7 +28,7 @@ use std::sync::{Arc, OnceLock};
 
 /// Subtrees whose estimated work (vector elements touched per traversal) is
 /// below this run sequentially: a Rayon task costs more than they do.
-const PARALLEL_WORK: u64 = 16_384;
+const PARALLEL_WORK: u64 = 32_768;
 
 /// "This member is the class representative: no relabeling."
 const NO_PERMUTATION: u32 = u32::MAX;
@@ -270,12 +270,14 @@ impl Builder<'_> {
                     })
                     .collect();
                 // Strategy rows, their totals, the child's own reach, every
-                // child's own values, and one child's opponent values.
+                // child's own values, one child's opponent values, and the
+                // bucket-merging update's temporaries.
                 let frame = children.len() * num_buckets
                     + num_buckets
                     + n[p]
                     + children.len() * n[p]
-                    + n[1 - p];
+                    + n[1 - p]
+                    + update_scratch(self.plan.bucketed, n[p], num_buckets);
                 self.push(
                     PlanNode::Decision {
                         id: *id,
@@ -307,6 +309,16 @@ fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [f64]) -> R) -> R {
     let result = f(&mut buffer[..len]);
     let _ = SCRATCH.try_with(|scratch| *scratch.borrow_mut() = buffer);
     result
+}
+
+/// Scratch `f64`s [`Trainer::update_node`] needs: none without abstraction,
+/// else the effective reach and three per-bucket rows.
+fn update_scratch(bucketed: bool, num_combos: usize, num_buckets: usize) -> usize {
+    if bucketed {
+        num_combos + 3 * num_buckets
+    } else {
+        0
+    }
 }
 
 /// Adds one dealt card's values to `out`, skipping combos that hold the card.
@@ -495,7 +507,7 @@ impl Trainer {
 
     /// Adds this iteration's regrets and average-strategy mass at one node.
     /// `child(a)` is action `a`'s values for the acting player and `node`
-    /// the node's own.
+    /// the node's own. `scratch` holds at least [`update_scratch`] values.
     #[allow(clippy::too_many_arguments)]
     fn update_node<'a>(
         &self,
@@ -508,6 +520,7 @@ impl Trainer {
         num_actions: usize,
         child: impl Fn(usize) -> &'a [f64],
         node: &[f64],
+        scratch: &mut [f64],
     ) {
         let num_buckets = board.num_buckets[player];
         let live = &board.live[player];
@@ -581,19 +594,24 @@ impl Trainer {
             .as_ref()
             .map_or(&self.game.identity_buckets[player], |maps| &maps[player]);
         let num_own_combos = reach.len();
-        let effective_reach: Vec<f64> = (0..num_own_combos)
-            .map(|i| if live[i] { reach[i] } else { 0.0 })
-            .collect();
-        let mut bucket_reach_total = vec![0.0; num_buckets];
-        let mut bucket_size = vec![0usize; num_buckets];
+        let (effective_reach, rest) = scratch.split_at_mut(num_own_combos);
+        let (bucket_reach_total, rest) = rest.split_at_mut(num_buckets);
+        let (bucket_size, rest) = rest.split_at_mut(num_buckets);
+        let regret_delta = &mut rest[..num_buckets];
+        for i in 0..num_own_combos {
+            effective_reach[i] = if live[i] { reach[i] } else { 0.0 };
+        }
+        bucket_reach_total.fill(0.0);
+        // Member counts, kept as (exact) floats to share the scratch buffer.
+        bucket_size.fill(0.0);
         for i in 0..num_own_combos {
             bucket_reach_total[buckets[i]] += effective_reach[i];
-            bucket_size[buckets[i]] += 1;
+            bucket_size[buckets[i]] += 1.0;
         }
-        let mut regret_delta = vec![0.0; num_buckets];
         for a in 0..num_actions {
             let row = &strategy[a * num_buckets..(a + 1) * num_buckets];
             let own = child(a);
+            let (regret_sum, strategy_sum) = (&mut regret_sum[a], &mut strategy_sum[a]);
             regret_delta.fill(0.0);
             for i in 0..num_own_combos {
                 let b = buckets[i];
@@ -601,16 +619,16 @@ impl Trainer {
                 let weight = if bucket_reach_total[b] > 0.0 {
                     effective_reach[i] / bucket_reach_total[b]
                 } else {
-                    1.0 / bucket_size[b] as f64
+                    1.0 / bucket_size[b]
                 };
                 regret_delta[b] += weight * delta;
-                strategy_sum[a][b] += effective_reach[i] * row[b];
+                strategy_sum[b] += effective_reach[i] * row[b];
             }
             for (b, delta) in regret_delta.iter().enumerate() {
-                regret_sum[a][b] = pass.update.regret(regret_sum[a][b], *delta);
+                regret_sum[b] = pass.update.regret(regret_sum[b], *delta);
                 // Once per bucket, after every combo's contribution: never
                 // apply DCFR discounting inside the combo loop.
-                strategy_sum[a][b] = pass.update.strategy_sum(strategy_sum[a][b]);
+                strategy_sum[b] = pass.update.strategy_sum(strategy_sum[b]);
             }
         }
     }
@@ -682,6 +700,8 @@ impl Trainer {
                 let (child_reach, rest) = rest.split_at_mut(reach[p].len());
                 let (child_own, rest) = rest.split_at_mut(num_actions * own_len);
                 let (child_other, rest) = rest.split_at_mut(other_out.len());
+                let (update, rest) =
+                    rest.split_at_mut(update_scratch(plan.bucketed, reach[p].len(), num_buckets));
                 self.fill_strategy(*id, board, p, num_actions, strategy, totals);
 
                 other_out.fill(0.0);
@@ -728,6 +748,7 @@ impl Trainer {
                     num_actions,
                     |a| &child_own[a * own_len..(a + 1) * own_len],
                     own_out,
+                    update,
                 );
             }
         }
@@ -823,6 +844,7 @@ impl Trainer {
                     num_actions,
                     |a| child_values[a][p].as_slice(),
                     &out[p],
+                    &mut vec![0.0; update_scratch(plan.bucketed, reach[p].len(), num_buckets)],
                 );
                 out
             }

@@ -1,6 +1,5 @@
 //! Frozen two-player traversal from before the target-only optimization.
 use super::*;
-use rayon::prelude::*;
 
 impl Trainer {
     fn legacy_cfr(

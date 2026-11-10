@@ -64,7 +64,7 @@ fn bench_evaluate_5(c: &mut Criterion) {
 fn bench_evaluate_7(c: &mut Criterion) {
     let hands: Vec<[Card; 7]> = sample_hands(2000);
 
-    c.bench_function("evaluate_7 (best-of-21, table-driven evaluate_5)", |b| {
+    c.bench_function("evaluate_7 (direct rank and suit counts)", |b| {
         b.iter(|| {
             for &h in &hands {
                 black_box(evaluate_7(black_box(h)));
