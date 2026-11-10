@@ -16,6 +16,10 @@ use crate::range::Combo;
 pub(super) struct TerminalIndex {
     /// All matching opponent entries, including reversed or repeated pairs.
     same_pair: [Vec<Vec<usize>>; 2],
+    /// Whether any of a player's combos has a matching opponent entry.
+    any_same_pair: [bool; 2],
+    /// Each combo's two card indices, per player.
+    cards: [Vec<[u8; 2]>; 2],
 }
 
 pub(super) struct BoardOrder {
@@ -24,6 +28,9 @@ pub(super) struct BoardOrder {
     // end for strictly weaker hands and suffix start for strictly stronger.
     // Board-dead combos never enter either order; ties lie between bounds.
     rank_bounds: [Vec<(usize, usize)>; 2],
+    /// The card indices of each `order` entry, so a sweep reads them in
+    /// sequence.
+    cards: [Vec<[u8; 2]>; 2],
 }
 
 impl BoardOrder {
@@ -53,65 +60,130 @@ impl BoardOrder {
                 })
                 .collect()
         });
-        Self { order, rank_bounds }
+        let cards = std::array::from_fn(|p| {
+            order[p]
+                .iter()
+                .map(|&i| combos[p][i].cards.map(|card| card.0))
+                .collect()
+        });
+        Self {
+            order,
+            rank_bounds,
+            cards,
+        }
     }
+}
+
+/// Card indices are below 52; masking with 63 lets the compiler drop the
+/// bounds check on the 64-entry tables.
+const CARD_SLOTS: usize = 64;
+
+fn slot(card: u8) -> usize {
+    card as usize & (CARD_SLOTS - 1)
 }
 
 #[derive(Clone)]
 struct ReachMass {
     total: f64,
-    card: [f64; 52],
+    card: [f64; CARD_SLOTS],
     support: i32,
-    card_support: [i32; 52],
+    card_support: [i32; CARD_SLOTS],
 }
 
 impl ReachMass {
     fn new() -> Self {
         Self {
             total: 0.0,
-            card: [0.0; 52],
+            card: [0.0; CARD_SLOTS],
             support: 0,
-            card_support: [0; 52],
+            card_support: [0; CARD_SLOTS],
         }
     }
 
+    #[cfg(test)]
     fn add(&mut self, combo: Combo, weight: f64) {
+        self.add_cards(combo.cards.map(|card| card.0), weight);
+    }
+
+    #[inline(always)]
+    fn add_cards(&mut self, cards: [u8; 2], weight: f64) {
         // Strategy zeros contribute neither mass nor support. Avoid touching
         // all three floating-point sums for these entries in each rank sweep.
         if weight == 0.0 {
             return;
         }
         self.total += weight;
-        self.card[combo.cards[0].0 as usize] += weight;
-        self.card[combo.cards[1].0 as usize] += weight;
+        self.card[slot(cards[0])] += weight;
+        self.card[slot(cards[1])] += weight;
         self.support += 1;
-        self.card_support[combo.cards[0].0 as usize] += 1;
-        self.card_support[combo.cards[1].0 as usize] += 1;
+        self.card_support[slot(cards[0])] += 1;
+        self.card_support[slot(cards[1])] += 1;
     }
 
+    #[cfg(test)]
     fn support_excluding(&self, combo: Combo) -> i32 {
-        self.support
-            - self.card_support[combo.cards[0].0 as usize]
-            - self.card_support[combo.cards[1].0 as usize]
+        self.support_excluding_cards(combo.cards.map(|card| card.0))
     }
 
-    fn cancellation_prone(&self, value: f64) -> bool {
+    #[inline(always)]
+    fn support_excluding_cards(&self, cards: [u8; 2]) -> i32 {
+        self.support - self.card_support[slot(cards[0])] - self.card_support[slot(cards[1])]
+    }
+
+    /// The largest value [`cancellation_prone`](Self::cancellation_prone)
+    /// accepts.
+    #[inline(always)]
+    fn cancellation_limit(&self) -> f64 {
         // A subtraction can lose a tiny genuine compatible reach next to
         // larger blocked weights. Budget roundoff relative to the result,
         // not only the total: exact-zero support is handled separately.
         let error_bound = 8.0 * f64::EPSILON * self.support as f64 * self.total.abs();
-        value <= error_bound / 1e-10
+        error_bound / 1e-10
     }
 
+    /// Whether `value`, a compatible mass of this accumulator, may have lost
+    /// its significant bits to cancellation.
+    #[inline(always)]
+    fn cancellation_prone(&self, value: f64) -> bool {
+        // With at most 1024 entries the limit is below `|total| / 32`
+        // (8 * EPSILON * 1024 / 1e-10 < 0.02), so a value well above that is
+        // never prone and the division can be skipped.
+        if self.support <= 1024 && value * 32.0 > self.total.abs() {
+            return false;
+        }
+        value <= self.cancellation_limit()
+    }
+
+    #[cfg(test)]
     fn excluding(&self, combo: Combo) -> f64 {
-        if self.support_excluding(combo) == 0 {
+        self.excluding_cards(combo.cards.map(|card| card.0))
+    }
+
+    /// Reach compatible with a hero holding `cards`, given `support`
+    /// ([`support_excluding_cards`](Self::support_excluding_cards)).
+    #[inline(always)]
+    fn excluding_with_support(&self, cards: [u8; 2], support: i32) -> f64 {
+        if support == 0 {
             // Preserve exact zero when every nonzero entry is blocked;
             // rounding residue must not invent reachable private deals.
             0.0
         } else {
-            self.total - self.card[combo.cards[0].0 as usize] - self.card[combo.cards[1].0 as usize]
+            self.total - self.card[slot(cards[0])] - self.card[slot(cards[1])]
         }
     }
+
+    #[cfg(test)]
+    fn excluding_cards(&self, cards: [u8; 2]) -> f64 {
+        self.excluding_with_support(cards, self.support_excluding_cards(cards))
+    }
+}
+
+fn disjoint_cards(a: [u8; 2], b: [u8; 2]) -> bool {
+    a[0] != b[0] && a[0] != b[1] && a[1] != b[0] && a[1] != b[1]
+}
+
+fn live_cards(cards: [u8; 2], board: u64) -> bool {
+    (board >> cards[0] | board >> cards[1]) & 1 == 0
 }
 
 fn disjoint(a: Combo, b: Combo) -> bool {
@@ -132,16 +204,26 @@ impl TerminalIndex {
             }
             lookup
         });
+        let same_pair: [Vec<Vec<usize>>; 2] = std::array::from_fn(|p| {
+            combos[p]
+                .iter()
+                .map(|combo| {
+                    lookup[1 - p]
+                        .get(&combo.sorted_cards())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        });
         Self {
-            same_pair: std::array::from_fn(|p| {
+            any_same_pair: std::array::from_fn(|p| {
+                same_pair[p].iter().any(|same| !same.is_empty())
+            }),
+            same_pair,
+            cards: std::array::from_fn(|p| {
                 combos[p]
                     .iter()
-                    .map(|combo| {
-                        lookup[1 - p]
-                            .get(&combo.sorted_cards())
-                            .cloned()
-                            .unwrap_or_default()
-                    })
+                    .map(|combo| combo.cards.map(|card| card.0))
                     .collect()
             }),
         }
@@ -170,32 +252,86 @@ impl TerminalIndex {
         out: &mut [f64],
     ) {
         debug_assert_eq!(out.len(), combos[player].len());
+        let opp_cards = &self.cards[1 - player];
         let mut mass = ReachMass::new();
-        for (&combo, &weight) in combos[1 - player].iter().zip(reach) {
-            if live(combo, board) {
-                mass.add(combo, weight);
+        // Ranges usually list combos grouped by their first card. Carrying
+        // that card's sums in registers (`run_*`) instead of reloading them
+        // from the tables keeps consecutive additions from waiting on each
+        // other's stores. Every sum still receives the same additions in the
+        // same order. Slot 63 is no card: the first flush writes zeros there.
+        let mut run = CARD_SLOTS - 1;
+        let (mut run_mass, mut run_support) = (0.0, 0);
+        for (&cards, &weight) in opp_cards.iter().zip(reach) {
+            if weight != 0.0 && live_cards(cards, board) {
+                let (first, second) = (slot(cards[0]), slot(cards[1]));
+                if first != run {
+                    mass.card[run] = run_mass;
+                    mass.card_support[run] = run_support;
+                    run = first;
+                    run_mass = mass.card[first];
+                    run_support = mass.card_support[first];
+                }
+                mass.total += weight;
+                mass.support += 1;
+                run_mass += weight;
+                run_support += 1;
+                if second == run {
+                    run_mass += weight;
+                    run_support += 1;
+                } else {
+                    mass.card[second] += weight;
+                    mass.card_support[second] += 1;
+                }
             }
         }
+        mass.card[run] = run_mass;
+        mass.card_support[run] = run_support;
+        let limit = mass.cancellation_limit();
+        let direct = |hero: [u8; 2]| -> f64 {
+            opp_cards
+                .iter()
+                .zip(reach)
+                .filter(|(other, _)| live_cards(**other, board) && disjoint_cards(hero, **other))
+                .map(|(_, &weight)| weight)
+                .sum()
+        };
+        if !self.any_same_pair[player] {
+            // No opponent entry repeats a hero pair: nothing to add back.
+            // (Adding the empty sum would not change a bit: the subtraction
+            // below never yields a negative zero.)
+            for (&cards, out) in self.cards[player].iter().zip(out.iter_mut()) {
+                *out = if live_cards(cards, board) {
+                    let support = mass.support_excluding_cards(cards);
+                    if support == 0 {
+                        0.0
+                    } else {
+                        let value =
+                            mass.total - mass.card[slot(cards[0])] - mass.card[slot(cards[1])];
+                        if value <= limit {
+                            direct(cards)
+                        } else {
+                            value
+                        }
+                    }
+                } else {
+                    0.0
+                };
+            }
+            return;
+        }
         let same_pair = &self.same_pair[player];
-        for ((&combo, same), out) in combos[player].iter().zip(same_pair).zip(out.iter_mut()) {
-            *out = if live(combo, board) {
+        for ((&cards, same), out) in self.cards[player].iter().zip(same_pair).zip(out.iter_mut()) {
+            *out = if live_cards(cards, board) {
                 // If hero is live, every exact matching opponent pair is too.
-                let support = mass.support_excluding(combo)
+                let support = mass.support_excluding_cards(cards)
                     + same.iter().filter(|&&j| reach[j] != 0.0).count() as i32;
                 if support == 0 {
                     0.0
                 } else {
-                    let value = mass.total
-                        - mass.card[combo.cards[0].0 as usize]
-                        - mass.card[combo.cards[1].0 as usize]
+                    let value = mass.total - mass.card[slot(cards[0])] - mass.card[slot(cards[1])]
                         + same.iter().map(|&j| reach[j]).sum::<f64>();
-                    if mass.cancellation_prone(value) {
-                        combos[1 - player]
-                            .iter()
-                            .zip(reach)
-                            .filter(|(other, _)| live(**other, board) && disjoint(combo, **other))
-                            .map(|(_, &weight)| weight)
-                            .sum()
+                    if value <= limit {
+                        direct(cards)
                     } else {
                         value
                     }
@@ -289,46 +425,51 @@ impl TerminalIndex {
                 *value *= tie_value;
             }
         }
+        let hero_order = &order.order[player];
+        let hero_cards = &order.cards[player];
+        let bounds = &order.rank_bounds[player];
+        let opp_order = &order.order[opp];
+        let opp_cards = &order.cards[opp];
+        debug_assert!(hero_order.len() == hero_cards.len() && hero_order.len() == bounds.len());
+
         let mut weaker = ReachMass::new();
         let mut j = 0;
-        for (&i, &(end, _)) in order.order[player].iter().zip(&order.rank_bounds[player]) {
-            while j < end {
-                let k = order.order[opp][j];
-                weaker.add(combos[opp][k], reach[k]);
-                j += 1;
+        for ((&i, &hero), &(end, _)) in hero_order.iter().zip(hero_cards).zip(bounds) {
+            if j < end {
+                for (&k, &cards) in opp_order[j..end].iter().zip(&opp_cards[j..end]) {
+                    weaker.add_cards(cards, reach[k]);
+                }
+                j = end;
             }
-            let mut mass = weaker.excluding(combos[player][i]);
-            if weaker.support_excluding(combos[player][i]) > 0 && weaker.cancellation_prone(mass) {
-                mass = order.order[opp][..j]
+            let support = weaker.support_excluding_cards(hero);
+            let mut mass = weaker.excluding_with_support(hero, support);
+            if support > 0 && weaker.cancellation_prone(mass) {
+                mass = opp_order[..j]
                     .iter()
-                    .copied()
-                    .filter(|&k| disjoint(combos[player][i], combos[opp][k]))
-                    .map(|k| reach[k])
+                    .zip(&opp_cards[..j])
+                    .filter(|(_, &cards)| disjoint_cards(hero, cards))
+                    .map(|(&k, _)| reach[k])
                     .sum();
             }
             values[i] += half_pot * mass;
         }
         let mut stronger = ReachMass::new();
-        let mut j = order.order[opp].len();
-        for (&i, &(_, start)) in order.order[player]
-            .iter()
-            .zip(&order.rank_bounds[player])
-            .rev()
-        {
-            while j > start {
-                j -= 1;
-                let k = order.order[opp][j];
-                stronger.add(combos[opp][k], reach[k]);
+        let mut j = opp_order.len();
+        for ((&i, &hero), &(_, start)) in hero_order.iter().zip(hero_cards).zip(bounds).rev() {
+            if j > start {
+                for (&k, &cards) in opp_order[start..j].iter().zip(&opp_cards[start..j]).rev() {
+                    stronger.add_cards(cards, reach[k]);
+                }
+                j = start;
             }
-            let mut mass = stronger.excluding(combos[player][i]);
-            if stronger.support_excluding(combos[player][i]) > 0
-                && stronger.cancellation_prone(mass)
-            {
-                mass = order.order[opp][j..]
+            let support = stronger.support_excluding_cards(hero);
+            let mut mass = stronger.excluding_with_support(hero, support);
+            if support > 0 && stronger.cancellation_prone(mass) {
+                mass = opp_order[j..]
                     .iter()
-                    .copied()
-                    .filter(|&k| disjoint(combos[player][i], combos[opp][k]))
-                    .map(|k| reach[k])
+                    .zip(&opp_cards[j..])
+                    .filter(|(_, &cards)| disjoint_cards(hero, cards))
+                    .map(|(&k, _)| reach[k])
                     .sum();
             }
             values[i] -= half_pot * mass;
