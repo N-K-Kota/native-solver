@@ -254,38 +254,11 @@ impl TerminalIndex {
         debug_assert_eq!(out.len(), combos[player].len());
         let opp_cards = &self.cards[1 - player];
         let mut mass = ReachMass::new();
-        // Ranges usually list combos grouped by their first card. Carrying
-        // that card's sums in registers (`run_*`) instead of reloading them
-        // from the tables keeps consecutive additions from waiting on each
-        // other's stores. Every sum still receives the same additions in the
-        // same order. Slot 63 is no card: the first flush writes zeros there.
-        let mut run = CARD_SLOTS - 1;
-        let (mut run_mass, mut run_support) = (0.0, 0);
         for (&cards, &weight) in opp_cards.iter().zip(reach) {
-            if weight != 0.0 && live_cards(cards, board) {
-                let (first, second) = (slot(cards[0]), slot(cards[1]));
-                if first != run {
-                    mass.card[run] = run_mass;
-                    mass.card_support[run] = run_support;
-                    run = first;
-                    run_mass = mass.card[first];
-                    run_support = mass.card_support[first];
-                }
-                mass.total += weight;
-                mass.support += 1;
-                run_mass += weight;
-                run_support += 1;
-                if second == run {
-                    run_mass += weight;
-                    run_support += 1;
-                } else {
-                    mass.card[second] += weight;
-                    mass.card_support[second] += 1;
-                }
+            if live_cards(cards, board) {
+                mass.add_cards(cards, weight);
             }
         }
-        mass.card[run] = run_mass;
-        mass.card_support[run] = run_support;
         let limit = mass.cancellation_limit();
         let direct = |hero: [u8; 2]| -> f64 {
             opp_cards

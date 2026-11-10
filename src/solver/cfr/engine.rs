@@ -30,6 +30,10 @@ use std::sync::{Arc, OnceLock};
 /// below this run sequentially: a Rayon task costs more than they do.
 const PARALLEL_WORK: u64 = 32_768;
 
+/// Largest scratch buffer (in `f64`s, 8 MiB) a thread keeps between
+/// traversals.
+const MAX_RETAINED_SCRATCH: usize = 1 << 20;
+
 /// "This member is the class representative: no relabeling."
 const NO_PERMUTATION: u32 = u32::MAX;
 
@@ -307,7 +311,11 @@ fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [f64]) -> R) -> R {
         buffer.resize(len, 0.0);
     }
     let result = f(&mut buffer[..len]);
-    let _ = SCRATCH.try_with(|scratch| *scratch.borrow_mut() = buffer);
+    // Keep ordinary buffers for the next traversal; give unusually large
+    // ones back so an idle worker does not pin them.
+    if buffer.len() <= MAX_RETAINED_SCRATCH {
+        let _ = SCRATCH.try_with(|scratch| *scratch.borrow_mut() = buffer);
+    }
     result
 }
 
