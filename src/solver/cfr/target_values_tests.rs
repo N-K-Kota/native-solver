@@ -1,5 +1,6 @@
 //! Frozen two-player traversal from before the target-only optimization.
 use super::*;
+use rayon::prelude::*;
 
 impl Trainer {
     fn legacy_cfr(
@@ -168,7 +169,7 @@ impl Trainer {
                     .game
                     .board_eval_cache
                     .get(&child_board)
-                    .unwrap_or(&empty_eval);
+                    .map_or(&empty_eval, |scores| &**scores);
                 let child_cfv = self.legacy_cfr(
                     child,
                     reach,
@@ -238,7 +239,10 @@ impl Trainer {
         let game = std::sync::Arc::clone(&self.game);
         let board = game.initial_board.clone();
         let empty_eval = [Vec::new(), Vec::new()];
-        let board_eval = game.board_eval_cache.get(&board).unwrap_or(&empty_eval);
+        let board_eval = game
+            .board_eval_cache
+            .get(&board)
+            .map_or(&empty_eval, |scores| &**scores);
         for _ in 0..iterations {
             let iteration = self.iterations_completed.checked_add(1).unwrap();
             let update = self.algorithm.iteration(iteration);

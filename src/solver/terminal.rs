@@ -154,46 +154,56 @@ impl TerminalIndex {
         reach: &[f64],
         board: u64,
     ) -> Vec<f64> {
+        let mut out = vec![0.0; combos[player].len()];
+        self.compatible_mass_into(combos, player, reach, board, &mut out);
+        out
+    }
+
+    /// [`compatible_mass`](Self::compatible_mass) written over `out`, which
+    /// must hold one entry per `player` combo.
+    pub(super) fn compatible_mass_into(
+        &self,
+        combos: &[Vec<Combo>; 2],
+        player: usize,
+        reach: &[f64],
+        board: u64,
+        out: &mut [f64],
+    ) {
+        debug_assert_eq!(out.len(), combos[player].len());
         let mut mass = ReachMass::new();
         for (&combo, &weight) in combos[1 - player].iter().zip(reach) {
             if live(combo, board) {
                 mass.add(combo, weight);
             }
         }
-        combos[player]
-            .iter()
-            .enumerate()
-            .map(|(i, &combo)| {
-                if live(combo, board) {
-                    // If hero is live, every exact matching opponent pair is too.
-                    let same = &self.same_pair[player][i];
-                    let support = mass.support_excluding(combo)
-                        + same.iter().filter(|&&j| reach[j] != 0.0).count() as i32;
-                    if support == 0 {
-                        0.0
-                    } else {
-                        let value = mass.total
-                            - mass.card[combo.cards[0].0 as usize]
-                            - mass.card[combo.cards[1].0 as usize]
-                            + same.iter().map(|&j| reach[j]).sum::<f64>();
-                        if mass.cancellation_prone(value) {
-                            combos[1 - player]
-                                .iter()
-                                .zip(reach)
-                                .filter(|(other, _)| {
-                                    live(**other, board) && disjoint(combo, **other)
-                                })
-                                .map(|(_, &weight)| weight)
-                                .sum()
-                        } else {
-                            value
-                        }
-                    }
-                } else {
+        let same_pair = &self.same_pair[player];
+        for ((&combo, same), out) in combos[player].iter().zip(same_pair).zip(out.iter_mut()) {
+            *out = if live(combo, board) {
+                // If hero is live, every exact matching opponent pair is too.
+                let support = mass.support_excluding(combo)
+                    + same.iter().filter(|&&j| reach[j] != 0.0).count() as i32;
+                if support == 0 {
                     0.0
+                } else {
+                    let value = mass.total
+                        - mass.card[combo.cards[0].0 as usize]
+                        - mass.card[combo.cards[1].0 as usize]
+                        + same.iter().map(|&j| reach[j]).sum::<f64>();
+                    if mass.cancellation_prone(value) {
+                        combos[1 - player]
+                            .iter()
+                            .zip(reach)
+                            .filter(|(other, _)| live(**other, board) && disjoint(combo, **other))
+                            .map(|(_, &weight)| weight)
+                            .sum()
+                    } else {
+                        value
+                    }
                 }
-            })
-            .collect()
+            } else {
+                0.0
+            };
+        }
     }
 
     /// Returns win-minus-loss reach weighted by `half_pot`. With unequal
@@ -210,6 +220,35 @@ impl TerminalIndex {
         board: u64,
         invested: &[f64; 2],
     ) -> Vec<f64> {
+        let mut values = vec![0.0; combos[player].len()];
+        self.showdown_into(
+            combos,
+            player,
+            reach,
+            scores,
+            order,
+            board,
+            invested,
+            &mut values,
+        );
+        values
+    }
+
+    /// [`showdown`](Self::showdown) written over `values`, which must hold
+    /// one entry per `player` combo.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn showdown_into(
+        &self,
+        combos: &[Vec<Combo>; 2],
+        player: usize,
+        reach: &[f64],
+        scores: &[Vec<u32>; 2],
+        order: &BoardOrder,
+        board: u64,
+        invested: &[f64; 2],
+        values: &mut [f64],
+    ) {
+        debug_assert_eq!(values.len(), combos[player].len());
         let opp = 1 - player;
         let small = invested[0].abs().min(invested[1].abs());
         let large = invested[0].abs().max(invested[1].abs());
@@ -217,13 +256,10 @@ impl TerminalIndex {
             // Constructed poker showdowns always have matched investments.
             // Public custom trees may not: avoid cancellation between the
             // affine tie offset and half-pot when their scales differ greatly.
-            return combos[player]
-                .iter()
-                .enumerate()
-                .map(|(i, &hero)| {
-                    if !live(hero, board) {
-                        return 0.0;
-                    }
+            for (i, (&hero, value)) in combos[player].iter().zip(values.iter_mut()).enumerate() {
+                *value = if !live(hero, board) {
+                    0.0
+                } else {
                     order.order[opp]
                         .iter()
                         .copied()
@@ -239,19 +275,20 @@ impl TerminalIndex {
                             reach[j] * net
                         })
                         .sum()
-                })
-                .collect();
+                };
+            }
+            return;
         }
         let half_pot = (invested[0] + invested[1]) / 2.0;
         let tie_value = (invested[opp] - invested[player]) / 2.0;
-        let mut values = if tie_value == 0.0 {
-            vec![0.0; combos[player].len()]
+        if tie_value == 0.0 {
+            values.fill(0.0);
         } else {
-            self.compatible_mass(combos, player, reach, board)
-                .into_iter()
-                .map(|mass| mass * tie_value)
-                .collect()
-        };
+            self.compatible_mass_into(combos, player, reach, board, values);
+            for value in values.iter_mut() {
+                *value *= tie_value;
+            }
+        }
         let mut weaker = ReachMass::new();
         let mut j = 0;
         for (&i, &(end, _)) in order.order[player].iter().zip(&order.rank_bounds[player]) {
@@ -296,7 +333,6 @@ impl TerminalIndex {
             }
             values[i] -= half_pot * mass;
         }
-        values
     }
 }
 
