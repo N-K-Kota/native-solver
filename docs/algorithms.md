@@ -18,6 +18,13 @@ Terminal values come from sums over the opponent's combos with card removal:
   combo's win and loss mass in time linear in the two range sizes. When a
   subtraction would lose a tiny compatible reach to rounding, the code falls
   back to a direct sum.
+- At a preflop showdown (an empty board), a combo's value is half the pot
+  times its edge: the sum over opponent combos of reach times the win
+  probability minus the loss probability over all runouts. The edges form a
+  combo-by-combo matrix built once per game from the shipped table of exact
+  outcome counts, one entry per suit-isomorphism class of two hands (47,008
+  classes). The product costs the two range sizes multiplied, which a
+  preflop tree's few terminals can afford.
 
 ## Traversal
 

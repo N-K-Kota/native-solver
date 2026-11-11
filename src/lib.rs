@@ -1,5 +1,6 @@
-//! Find near-equilibrium strategies for heads-up postflop No-Limit Hold'em
-//! spots, and measure how exploitable they are.
+//! Find near-equilibrium strategies for heads-up No-Limit Hold'em spots,
+//! postflop or in the preflop betting round, and measure how exploitable
+//! they are.
 //!
 //! Give it a board, both players' ranges, the pot, the stacks, and the bet
 //! sizes to consider; it trains a strategy with counterfactual regret
@@ -12,11 +13,15 @@
 //! - [`card`]: [`Card`]s and [`CardSet`]s.
 //! - [`eval`]: five- and seven-card hand evaluation.
 //! - [`range`]: weighted preflop ranges and their expansion into [`Combo`]s.
-//! - [`solver`]: the betting tree ([`GameConfig`], [`build_tree`]) and the
-//!   combo-vectorized CFR [`Trainer`], with exploitability and node EVs.
+//! - [`solver`]: the betting trees ([`GameConfig`] with [`build_tree`] from
+//!   the flop on, [`PreflopConfig`] with [`build_preflop_tree`] before it)
+//!   and the combo-vectorized CFR [`Trainer`], with exploitability and node
+//!   EVs.
 //!
-//! Only heads-up postflop play is modeled: no preflop, no side pots, no
-//! multiway pots. All values are in input chips unless a doc says otherwise.
+//! Only heads-up play is modeled: no side pots, no multiway pots. A preflop
+//! tree covers the preflop betting round and settles called pots over every
+//! runout; it does not continue onto the flop. All values are in input chips
+//! unless a doc says otherwise.
 //!
 //! # Example
 //!
@@ -72,10 +77,10 @@ pub mod algorithms {}
 
 pub use card::{Card, CardParseError, CardSet};
 pub use eval::{evaluate_5, evaluate_7, HandCategory, HandStrength};
-pub use range::{all_canonical_hands, Combo, Range, RangeError};
+pub use range::{all_canonical_hands, average_by_hand, Combo, Range, RangeError};
 pub use solver::{
-    build_tree, build_tree_bounded, Action, BoardError, CardAbstraction, Chips, Evaluation,
-    Exploitability, GameConfig, Node, NodeEvaluation, Player, Policy, PolicyError, SolverAlgorithm,
-    SolverGame, Terminal, Trainer, TrainerError, TrainerOptions, Tree, TreeError, UpdateSchedule,
-    CHIP_SCALE,
+    build_preflop_tree, build_preflop_tree_bounded, build_tree, build_tree_bounded, Action,
+    BoardError, CardAbstraction, Chips, Evaluation, Exploitability, GameConfig, Node,
+    NodeEvaluation, Player, Policy, PolicyError, PreflopConfig, SolverAlgorithm, SolverGame,
+    Terminal, Trainer, TrainerError, TrainerOptions, Tree, TreeError, UpdateSchedule, CHIP_SCALE,
 };

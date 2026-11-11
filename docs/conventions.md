@@ -39,6 +39,32 @@ another calculation.
 - Every value below is in input chips, the same units as `pot`. Divide by the
   pot yourself for a percentage. Nothing is reported in big blinds or mbb.
 
+## Preflop trees
+
+- `build_preflop_tree` returns a tree with an empty board and no chance
+  nodes. The small blind is the button: it acts first and is `Player::Ip`.
+  The big blind is `Player::Oop`. The root is therefore an IP decision,
+  unlike a postflop tree.
+- `effective_stack` is each player's chips at the start of the hand, blind
+  included. `invested[p]` is everything `p` has put in, blind included; there
+  is no shared starting pot.
+- A raise size is a multiple of the bet being raised (`3.0` re-raises a bet
+  of 6 to 18). It is lifted to the legal minimum raise and clipped to the
+  stack. `Action::Raise(x)` keeps its meaning: call, then add `x` on top.
+- A `Terminal::Showdown` on an empty board runs out all five cards. A combo
+  pair's payoff is the average of the usual showdown payoff over the
+  1,712,304 boards that avoid both hands, from exact integer win and tie
+  counts. This is the exact value of an all-in. After a call with chips
+  behind it is the value of checking the hand down.
+- Values are in the same chips as the blinds. With a big blind of `1`,
+  exploitability is in big blinds.
+- Pass `CardSet::EMPTY` as the dead cards to `Range::combos`. Card
+  abstraction and suit isomorphism do not apply; `Trainer::new` returns
+  `TrainerError::PreflopAbstraction` if abstraction is requested.
+- `NodeEvaluation::equity` is `None` at preflop nodes.
+- Strategies are per combo. Combos of one canonical hand can end up with
+  different strategies; `average_by_hand` reports the usual 169-hand view.
+
 ## Counterfactual values versus EVs
 
 The solver works with raw counterfactual values (CFVs). A raw CFV for one of
@@ -125,4 +151,6 @@ read them.
 best-response values, NashConv, and exploitability by enumerating private
 deals, without sharing any code path with the trainer. It is for small trees,
 tests, and audits. It rejects trees with suit-isomorphism classes; build an
-unreduced tree for it.
+unreduced tree for it. For a preflop tree it enumerates every board for every
+pair of combos instead of using the equity table, so keep the ranges to a
+handful of combos.

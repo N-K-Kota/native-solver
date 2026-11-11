@@ -106,6 +106,89 @@ impl Combo {
         let [a, b] = self.cards;
         (a.min(b), a.max(b))
     }
+
+    /// The canonical hand this combo belongs to, such as `"AKs"`, `"T9o"`,
+    /// or `"77"`: the notation [`Range`] and [`all_canonical_hands`] use.
+    ///
+    /// ```
+    /// use native_solver::{Card, Combo};
+    ///
+    /// let card = |s: &str| s.parse::<Card>();
+    /// assert_eq!(Combo::new(card("Td")?, card("Ad")?, 1.0).hand(), "ATs");
+    /// assert_eq!(Combo::new(card("7c")?, card("7s")?, 1.0).hand(), "77");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn hand(&self) -> String {
+        let [a, b] = self.cards;
+        let (high, low) = if a.rank() >= b.rank() { (a, b) } else { (b, a) };
+        let rank = |card: Card| RANKS.as_bytes()[card.rank() as usize] as char;
+        if high.rank() == low.rank() {
+            format!("{}{}", rank(high), rank(low))
+        } else {
+            let suffix = if high.suit() == low.suit() { 's' } else { 'o' };
+            format!("{}{}{suffix}", rank(high), rank(low))
+        }
+    }
+}
+
+/// Averages per-combo rows over each canonical hand.
+///
+/// `rows` holds one row per quantity (for a strategy, one per action), each
+/// with one value per combo of `combos`, as [`Trainer::average_strategy`]
+/// returns them. The result lists every hand that has a combo, in
+/// [`all_canonical_hands`] order, with one average per row. Combos count by
+/// their weight; a hand whose combos all weigh zero is averaged evenly.
+///
+/// Preflop results are usually read this way: 169 hands instead of 1,326
+/// combos.
+///
+/// # Panics
+/// Panics if a row has fewer values than there are combos.
+///
+/// ```
+/// use native_solver::{average_by_hand, CardSet, Range};
+///
+/// let combos = "AA,AKs".parse::<Range>()?.combos(CardSet::EMPTY);
+/// // One row: 1.0 for every pair combo, 0.5 for every suited combo.
+/// let row: Vec<f64> = combos
+///     .iter()
+///     .map(|combo| if combo.hand() == "AA" { 1.0 } else { 0.5 })
+///     .collect();
+/// assert_eq!(
+///     average_by_hand(&combos, &[row]),
+///     [("AA".to_string(), vec![1.0]), ("AKs".to_string(), vec![0.5])]
+/// );
+/// # Ok::<(), native_solver::RangeError>(())
+/// ```
+///
+/// [`Trainer::average_strategy`]: crate::Trainer::average_strategy
+pub fn average_by_hand(combos: &[Combo], rows: &[Vec<f64>]) -> Vec<(String, Vec<f64>)> {
+    let mut members: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, combo) in combos.iter().enumerate() {
+        members.entry(combo.hand()).or_default().push(index);
+    }
+    all_canonical_hands()
+        .into_iter()
+        .filter_map(|hand| {
+            let indices = members.remove(&hand)?;
+            let total: f64 = indices.iter().map(|&i| combos[i].weight).sum();
+            let averages = rows
+                .iter()
+                .map(|row| {
+                    if total > 0.0 {
+                        indices
+                            .iter()
+                            .map(|&i| combos[i].weight * row[i])
+                            .sum::<f64>()
+                            / total
+                    } else {
+                        indices.iter().map(|&i| row[i]).sum::<f64>() / indices.len() as f64
+                    }
+                })
+                .collect();
+            Some((hand, averages))
+        })
+        .collect()
 }
 
 /// A weighted preflop range, keyed by canonical hand notation.

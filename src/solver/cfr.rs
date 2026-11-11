@@ -22,6 +22,7 @@
 //! that safe. It is never contended: one traversal reaches a node once.
 
 use super::discount::{IterationUpdate, SolverAlgorithm, UpdateSchedule};
+use super::preflop_equity::RunoutEdge;
 use super::terminal::{BoardOrder, TerminalIndex};
 use super::tree::{validate_board, BoardError, Node, Player, Terminal};
 #[cfg(test)]
@@ -260,6 +261,9 @@ pub enum TrainerError {
     /// Every pair of positive-weight combos shares a card, so no deal is
     /// possible and every value would be undefined.
     NoCompatibleDeals,
+    /// A preflop tree (empty board) was given card abstraction, which only
+    /// applies to flop, turn, and river decisions.
+    PreflopAbstraction,
     /// A [`CardAbstraction`] street asks for zero buckets.
     ZeroBuckets,
     /// A range is not closed under the initial board's free-suit swaps.
@@ -299,6 +303,9 @@ impl std::fmt::Display for TrainerError {
             Self::NoCompatibleDeals => {
                 write!(f, "no pair of positive-weight combos can be dealt together")
             }
+            Self::PreflopAbstraction => {
+                write!(f, "card abstraction does not apply to a preflop tree")
+            }
             Self::ZeroBuckets => write!(f, "card abstraction bucket counts must be positive"),
             Self::AsymmetricRange { player } => write!(
                 f,
@@ -330,7 +337,12 @@ fn validate_trainer_inputs(
     abstraction: CardAbstraction,
 ) -> Result<(), TrainerError> {
     let initial_board = tree.board.as_slice();
-    validate_board(initial_board)?;
+    // An empty board is a preflop tree: betting only, settled over runouts.
+    if !initial_board.is_empty() {
+        validate_board(initial_board)?;
+    } else if abstraction != CardAbstraction::default() {
+        return Err(TrainerError::PreflopAbstraction);
+    }
     let mut seen_ids = vec![false; tree.num_decision_nodes];
     validate_tree(&tree.root, &mut initial_board.to_vec(), &mut seen_ids)?;
     if seen_ids.iter().any(|&seen| !seen) {
@@ -442,6 +454,9 @@ fn validate_tree(
             if board.len() >= 5 {
                 return Err(TrainerError::TreeBoardMismatch);
             }
+            if board.is_empty() {
+                return invalid("a preflop tree must not deal cards");
+            }
             let mut dealt = mask_of(board);
             let mut count = 0;
             for (members, _) in children {
@@ -483,7 +498,8 @@ fn validate_tree(
             let invested = match terminal {
                 Terminal::Fold { invested, .. } => invested,
                 Terminal::Showdown { invested } => {
-                    if board.len() != 5 {
+                    // On an empty board a showdown runs out all five cards.
+                    if board.len() != 5 && !board.is_empty() {
                         return Err(TrainerError::TreeBoardMismatch);
                     }
                     invested
@@ -518,6 +534,8 @@ pub struct SolverGame {
     combo_index: [HashMap<(Card, Card), usize>; 2],
     /// Linear-time card-removal kernels and immutable per-board rank orders.
     terminal_index: TerminalIndex,
+    /// Preflop trees only: each combo pair's edge over all five-card runouts.
+    runout: Option<RunoutEdge>,
     board_order_cache: HashMap<Vec<Card>, Arc<BoardOrder>>,
     /// Per-street card abstraction setting this trainer was built with —
     /// see [`CardAbstraction`] and the module doc comment's "card
@@ -718,6 +736,7 @@ impl Trainer {
 
         let combo_index = [build_combo_index(&combos[0]), build_combo_index(&combos[1])];
         let terminal_index = TerminalIndex::new(&combos);
+        let runout = initial_board.is_empty().then(|| RunoutEdge::new(&combos));
         let board_order_cache = board_eval_cache
             .iter()
             .filter(|(board, _)| board.len() == 5)
@@ -820,6 +839,7 @@ impl Trainer {
             board_eval_cache,
             combo_index,
             terminal_index,
+            runout,
             board_order_cache,
             abstraction,
             bucket_maps,
@@ -1382,6 +1402,27 @@ impl SolverGame {
                         }
                     }
                 };
+            }
+            return;
+        }
+        if let (Terminal::Showdown { invested }, Some(runout)) = (t, &self.runout) {
+            // Preflop: the pot is settled over every runout. As at a river
+            // showdown, a combo's value is half the pot times its edge (win
+            // minus loss mass) plus, for unequal investments, the tie value
+            // times the compatible mass.
+            let half_pot = (invested[0] + invested[1]) / 2.0;
+            let tie_value = (invested[1 - player] - invested[player]) / 2.0;
+            runout.apply(player, reach_opp, out);
+            for edge in out.iter_mut() {
+                *edge *= half_pot;
+            }
+            if tie_value != 0.0 {
+                let mass =
+                    self.terminal_index
+                        .compatible_mass(&self.combos, player, reach_opp, board_set);
+                for (value, mass) in out.iter_mut().zip(mass) {
+                    *value += tie_value * mass;
+                }
             }
             return;
         }

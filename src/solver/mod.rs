@@ -7,6 +7,8 @@
 mod cfr;
 mod chips;
 mod discount;
+mod preflop;
+mod preflop_equity;
 pub mod quality;
 mod tree;
 
@@ -16,6 +18,9 @@ pub use cfr::{
 };
 pub use chips::{Chips, CHIP_SCALE};
 pub use discount::{SolverAlgorithm, UpdateSchedule};
+pub use preflop::{build_preflop_tree, build_preflop_tree_bounded, PreflopConfig};
+#[doc(hidden)]
+pub use preflop_equity::generate_preflop_equity_table;
 pub use tree::{
     build_tree, build_tree_bounded, Action, BoardError, GameConfig, Node, Player, Terminal, Tree,
     TreeError,

@@ -208,13 +208,18 @@ impl Builder<'_> {
         match node {
             Node::Terminal(terminal) => {
                 let board = self.board(board);
+                // A preflop showdown multiplies a combo-by-combo matrix by
+                // the opponent's reach, once per player.
+                let runout = matches!(terminal, Terminal::Showdown { .. })
+                    && self.game.initial_board.is_empty();
+                let work = if runout { 2 * n[0] * n[1] } else { both };
                 self.push(
                     PlanNode::Terminal {
                         board,
                         terminal: *terminal,
                     },
                     0,
-                    both as u64,
+                    work as u64,
                 )
             }
             Node::Chance { children } => {

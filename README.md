@@ -1,11 +1,14 @@
 # native-solver
 
-A heads-up postflop No-Limit Hold'em solver in Rust. It includes:
+A heads-up No-Limit Hold'em solver in Rust, for postflop spots and for the
+preflop betting round. It includes:
 
 - a table-driven 5- and 7-card hand evaluator,
 - weighted preflop ranges that expand into concrete two-card combos,
 - betting-tree construction from the flop, turn, or river with configurable
   bet sizes and raise caps,
+- a heads-up preflop betting tree (blinds, limps, raise sizes, all-ins) whose
+  called pots are settled over every runout from an exact equity table,
 - a combo-vectorized CFR trainer with CFR, CFR+, and Discounted CFR,
   simultaneous or alternating updates, optional suit-isomorphism reduction
   and card abstraction,
@@ -93,10 +96,57 @@ says nothing about convergence. Check `exploitability()` instead.
 Training runs in parallel on Rayon's global thread pool. The thread count
 does not change the results; see [docs/algorithms.md](docs/algorithms.md).
 
+## Preflop
+
+`build_preflop_tree` builds the preflop betting round: the small blind (the
+button, `Player::Ip`) acts first against the big blind (`Player::Oop`). The
+same `Trainer` solves it. This finds the push-or-fold equilibrium with 10 big
+blinds and prints how often each hand shoves:
+
+```rust
+use native_solver::{
+    all_canonical_hands, average_by_hand, build_preflop_tree, CardSet, Chips, Player,
+    PreflopConfig, Range, Trainer, TrainerOptions,
+};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let half = Chips::from_f64(0.5).ok_or("0.5 is a valid chip amount")?;
+    let config = PreflopConfig::new(half, Chips::whole(1), Chips::whole(10))
+        .with_all_in(true)
+        .with_max_raises(1)
+        .with_limp(false);
+
+    // Every hand for both players; nothing is dead before the flop.
+    let all: Range = all_canonical_hands().join(",").parse()?;
+    let ranges = [all.combos(CardSet::EMPTY), all.combos(CardSet::EMPTY)];
+
+    let mut trainer = Trainer::new(build_preflop_tree(&config)?, ranges, TrainerOptions::default())?;
+    trainer.train(400);
+    println!("exploitability: {:.4} big blinds", trainer.exploitability().total);
+
+    // Node 0 is the small blind's decision; row 1 is the shove.
+    let strategy = trainer.average_strategy(0);
+    for (hand, row) in average_by_hand(trainer.game().combos(Player::Ip), &strategy) {
+        println!("{hand}: shove {:.0}%", row[1] * 100.0);
+    }
+    Ok(())
+}
+```
+
+No cards are dealt inside a preflop tree. When a bet is called, or the big
+blind checks behind a limp, the pot goes to a showdown over all 1,712,304
+possible boards, using exact win and tie counts for each pair of hands. That
+is the true value of an all-in. For a call with chips behind it assumes the
+hand is checked down, so trees with small raises and calls are approximations
+of real play; push-or-fold and all-in lines are exact.
+
 ## Errors
 
 `build_tree` returns a `TreeError` for an illegal board, a non-positive pot,
 a negative stack, or a bet size that is not a positive finite number.
+`build_preflop_tree` returns one unless
+`0 < small blind < big blind <= effective stack` and every raise size is a
+finite multiple above 1.
 `Trainer::new` returns a `TrainerError` for inputs it cannot solve, for
 example when the tree does not continue from the initial board, or when a
 range is empty, contains invalid, repeated, or board-blocked combos, or
@@ -112,7 +162,10 @@ normalization, and the requirements of suit-isomorphism reduction, and
 
 ## Limitations
 
-- Heads-up and postflop only: no preflop tree, multiway pots, or side pots.
+- Heads-up only: no multiway pots or side pots.
+- A preflop tree does not continue onto the flop. A called pot is settled as
+  if checked down, which is exact only when a player is all in. Card
+  abstraction does not apply to preflop trees.
 - No rake.
 - Bet sizes are fractions of the pot. An all-in is not added automatically,
   so include a large enough fraction if you want one.

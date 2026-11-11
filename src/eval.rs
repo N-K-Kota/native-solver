@@ -422,60 +422,93 @@ fn best_straight_high(mask: u16) -> Option<u32> {
 /// Reads the best five-card hand directly from rank and suit counts. Equal to
 /// the maximum of [`score_5`] over all 21 five-card subsets.
 pub(crate) fn score_7(cards: [Card; 7]) -> u32 {
-    let mut suits = [0u16; 4];
-    // Ranks held at least once, twice, three and four times.
-    let (mut any, mut pairs, mut trips, mut quads) = (0u16, 0u16, 0u16, 0u16);
+    let mut state = HandState::default();
     for card in cards {
+        state = state.with(card);
+    }
+    state.score()
+}
+
+/// The rank and suit counts of up to seven cards, built one card at a time
+/// so callers that score many hands on one board can share the board's part.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HandState {
+    suits: [u16; 4],
+    /// Ranks held at least once, twice, three and four times.
+    any: u16,
+    pairs: u16,
+    trips: u16,
+    quads: u16,
+}
+
+impl HandState {
+    /// These cards plus `card`.
+    #[inline]
+    pub(crate) fn with(mut self, card: Card) -> Self {
         let bit = 1u16 << card.rank();
-        suits[card.suit() as usize] |= bit;
-        quads |= trips & bit;
-        trips |= pairs & bit;
-        pairs |= any & bit;
-        any |= bit;
+        self.suits[card.suit() as usize] |= bit;
+        self.quads |= self.trips & bit;
+        self.trips |= self.pairs & bit;
+        self.pairs |= self.any & bit;
+        self.any |= bit;
+        self
     }
 
-    // Five cards of one suit leave room for at most one more card of any of
-    // their ranks plus one other, so a flush rules out quads and full houses.
-    for flush in suits {
-        if flush.count_ones() >= 5 {
-            return match best_straight_high(flush) {
-                Some(high) => (CAT_STRAIGHT_FLUSH << 20) | (high << 16),
-                None => (CAT_FLUSH << 20) | pack_top_ranks(flush, 5, 0),
-            };
+    /// The score of the best five-card hand among seven distinct cards.
+    #[inline]
+    pub(crate) fn score(&self) -> u32 {
+        let Self {
+            suits,
+            any,
+            pairs,
+            trips,
+            quads,
+        } = *self;
+        // Five cards of one suit leave room for at most one more card of any of
+        // their ranks plus one other, so a flush rules out quads and full houses.
+        for flush in suits {
+            if flush.count_ones() >= 5 {
+                return match best_straight_high(flush) {
+                    Some(high) => (CAT_STRAIGHT_FLUSH << 20) | (high << 16),
+                    None => (CAT_FLUSH << 20) | pack_top_ranks(flush, 5, 0),
+                };
+            }
         }
-    }
-    if quads != 0 {
-        let quad = top_rank(quads);
-        return (CAT_FOUR_KIND << 20) | (quad << 16) | pack_top_ranks(any & !(1 << quad), 1, 1);
-    }
-    if trips != 0 {
-        let trip = top_rank(trips);
-        let others = pairs & !(1 << trip);
-        if others != 0 {
-            return (CAT_FULL_HOUSE << 20) | (trip << 16) | (top_rank(others) << 12);
+        if quads != 0 {
+            let quad = top_rank(quads);
+            return (CAT_FOUR_KIND << 20) | (quad << 16) | pack_top_ranks(any & !(1 << quad), 1, 1);
         }
-    }
-    if let Some(high) = best_straight_high(any) {
-        return (CAT_STRAIGHT << 20) | (high << 16);
-    }
-    if trips != 0 {
-        let trip = top_rank(trips);
-        return (CAT_THREE_KIND << 20) | (trip << 16) | pack_top_ranks(any & !(1 << trip), 2, 1);
-    }
-    if pairs != 0 {
-        let high = top_rank(pairs);
-        let lower = pairs & !(1 << high);
-        if lower != 0 {
-            let low = top_rank(lower);
-            let kickers = any & !(1 << high) & !(1 << low);
-            return (CAT_TWO_PAIR << 20)
-                | (high << 16)
-                | (low << 12)
-                | pack_top_ranks(kickers, 1, 2);
+        if trips != 0 {
+            let trip = top_rank(trips);
+            let others = pairs & !(1 << trip);
+            if others != 0 {
+                return (CAT_FULL_HOUSE << 20) | (trip << 16) | (top_rank(others) << 12);
+            }
         }
-        return (CAT_PAIR << 20) | (high << 16) | pack_top_ranks(any & !(1 << high), 3, 1);
+        if let Some(high) = best_straight_high(any) {
+            return (CAT_STRAIGHT << 20) | (high << 16);
+        }
+        if trips != 0 {
+            let trip = top_rank(trips);
+            return (CAT_THREE_KIND << 20)
+                | (trip << 16)
+                | pack_top_ranks(any & !(1 << trip), 2, 1);
+        }
+        if pairs != 0 {
+            let high = top_rank(pairs);
+            let lower = pairs & !(1 << high);
+            if lower != 0 {
+                let low = top_rank(lower);
+                let kickers = any & !(1 << high) & !(1 << low);
+                return (CAT_TWO_PAIR << 20)
+                    | (high << 16)
+                    | (low << 12)
+                    | pack_top_ranks(kickers, 1, 2);
+            }
+            return (CAT_PAIR << 20) | (high << 16) | pack_top_ranks(any & !(1 << high), 3, 1);
+        }
+        (CAT_HIGH_CARD << 20) | pack_top_ranks(any, 5, 0)
     }
-    (CAT_HIGH_CARD << 20) | pack_top_ranks(any, 5, 0)
 }
 
 /// [`score_7`] as originally defined: the best of all 21 five-card subsets.

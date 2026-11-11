@@ -7,6 +7,11 @@
 //! a best response observes its own cards and public history, never the other
 //! player's cards. Public deals condition on both players' private cards.
 //!
+//! A preflop tree (empty board, no chance nodes) ends called pots in a
+//! showdown over all five-card runouts. Those are enumerated here board by
+//! board for every pair of combos, without the trainer's equity table, so
+//! keep preflop ranges to a handful of combos.
+//!
 //! Only complete, singleton-card chance trees are supported. Suit-isomorphism
 //! representatives and sampled/incomplete chance trees are rejected. Both
 //! players may deviate independently per combo, even when the supplied policy
@@ -138,6 +143,9 @@ pub struct ReferenceEvaluator<'a> {
     decisions: Vec<(usize, usize, usize)>,
     /// Row-major OOP x IP showdown ordering (-1, 0, 1) for each complete board.
     outcomes: HashMap<u64, Vec<i8>>,
+    /// Preflop trees: per private pair, OOP's win, tie, and loss probability
+    /// over every runout. Filled on the first empty-board showdown.
+    runouts: Vec<[f64; 3]>,
 }
 
 impl std::fmt::Debug for ReferenceEvaluator<'_> {
@@ -172,8 +180,10 @@ impl<'a> ReferenceEvaluator<'a> {
         initial_board: &'a [Card],
         combos: [&'a [Combo]; 2],
     ) -> Result<Self, QualityError> {
-        if !(3..=5).contains(&initial_board.len()) {
-            return Err(QualityError::InvalidBoard("expected 3 to 5 cards".into()));
+        if !initial_board.is_empty() && !(3..=5).contains(&initial_board.len()) {
+            return Err(QualityError::InvalidBoard(
+                "expected 3 to 5 cards, or none for a preflop tree".into(),
+            ));
         }
         let mut board_mask = 0u64;
         for &card in initial_board {
@@ -232,6 +242,7 @@ impl<'a> ReferenceEvaluator<'a> {
             joint_mass,
             decisions: Vec::new(),
             outcomes: HashMap::new(),
+            runouts: Vec::new(),
         };
         evaluator.validate_tree(root, &mut initial_board.to_vec(), &mut HashSet::new(), 0)?;
         Ok(evaluator)
@@ -375,6 +386,9 @@ impl<'a> ReferenceEvaluator<'a> {
                 if board.len() >= 5 {
                     return Err(invalid("cannot deal past a five-card board"));
                 }
+                if board.is_empty() {
+                    return Err(invalid("a preflop tree must not deal cards"));
+                }
                 if children.iter().any(|(members, _)| members.len() > 1) {
                     return Err(QualityError::UnsupportedChanceReduction);
                 }
@@ -409,14 +423,60 @@ impl<'a> ReferenceEvaluator<'a> {
                     ));
                 }
                 if matches!(terminal, Terminal::Showdown { .. }) {
-                    if board.len() != 5 {
+                    if board.is_empty() {
+                        self.cache_runouts();
+                    } else if board.len() != 5 {
                         return Err(invalid("showdown requires a complete five-card board"));
+                    } else {
+                        self.cache_outcomes(board);
                     }
-                    self.cache_outcomes(board);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Counts every five-card board for every compatible private pair.
+    fn cache_runouts(&mut self) {
+        if !self.runouts.is_empty() {
+            return;
+        }
+        for (i, a) in self.combos[0].iter().enumerate() {
+            for (j, b) in self.combos[1].iter().enumerate() {
+                let used = self.masks[0][i] | self.masks[1][j];
+                if self.masks[0][i] & self.masks[1][j] != 0 {
+                    // Impossible pairs have zero prior/reach.
+                    self.runouts.push([0.0; 3]);
+                    continue;
+                }
+                let deck: Vec<Card> = Card::all().filter(|&card| used & bit(card) == 0).collect();
+                let mut counts = [0u32; 3];
+                for c0 in 0..deck.len() {
+                    for c1 in c0 + 1..deck.len() {
+                        for c2 in c1 + 1..deck.len() {
+                            for c3 in c2 + 1..deck.len() {
+                                for c4 in c3 + 1..deck.len() {
+                                    let board = [deck[c0], deck[c1], deck[c2], deck[c3], deck[c4]];
+                                    let score = |[x, y]: [Card; 2]| {
+                                        score_7([
+                                            x, y, board[0], board[1], board[2], board[3], board[4],
+                                        ])
+                                    };
+                                    counts[match score(a.cards).cmp(&score(b.cards)) {
+                                        std::cmp::Ordering::Greater => 0,
+                                        std::cmp::Ordering::Equal => 1,
+                                        std::cmp::Ordering::Less => 2,
+                                    }] += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                let boards: u32 = counts.iter().sum();
+                self.runouts
+                    .push(counts.map(|count| count as f64 / boards as f64));
+            }
+        }
     }
 
     fn cache_outcomes(&mut self, board: &[Card]) {
@@ -480,6 +540,17 @@ impl PrivateProblem<'_, '_> {
                             } else {
                                 -invested[self.player]
                             }
+                        }
+                        Terminal::Showdown { invested } if board == 0 => {
+                            let [oop_wins, ties, oop_losses] = self.evaluator.runouts
+                                [self.evaluator.pair_index(self.player, self.own, opp)];
+                            let (wins, losses) = if self.player == 0 {
+                                (oop_wins, oop_losses)
+                            } else {
+                                (oop_losses, oop_wins)
+                            };
+                            wins * invested[1 - self.player] - losses * invested[self.player]
+                                + ties * (invested[1 - self.player] - invested[self.player]) / 2.0
                         }
                         Terminal::Showdown { invested } => {
                             let oop_order = self.evaluator.outcomes[&board]

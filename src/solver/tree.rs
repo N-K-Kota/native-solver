@@ -274,6 +274,15 @@ pub enum TreeError {
         /// Position of the size in [`GameConfig::bet_sizes`].
         index: usize,
     },
+    /// A preflop tree's blinds do not satisfy
+    /// `0 < small blind < big blind <= effective stack`.
+    InvalidBlinds,
+    /// A preflop raise size is not a finite multiple above `1`.
+    InvalidRaiseSize {
+        /// Position of the size in
+        /// [`PreflopConfig::raise_sizes`](super::PreflopConfig::raise_sizes).
+        index: usize,
+    },
     /// The tree would need more decision nodes than the supplied budget.
     TooManyDecisionNodes {
         /// The decision-node budget that was exceeded.
@@ -290,6 +299,14 @@ impl std::fmt::Display for TreeError {
             Self::InvalidBetSize { index } => write!(
                 f,
                 "bet size at index {index} must be a positive, finite pot fraction"
+            ),
+            Self::InvalidBlinds => write!(
+                f,
+                "blinds must satisfy 0 < small blind < big blind <= effective stack"
+            ),
+            Self::InvalidRaiseSize { index } => write!(
+                f,
+                "raise size at index {index} must be a finite multiple above 1"
             ),
             Self::TooManyDecisionNodes { limit } => write!(
                 f,
@@ -386,10 +403,7 @@ pub fn build_tree(cfg: &GameConfig) -> Result<Tree, TreeError> {
 /// [`TreeError::TooManyDecisionNodes`] when the budget is exceeded.
 pub fn build_tree_bounded(cfg: &GameConfig, max_decision_nodes: usize) -> Result<Tree, TreeError> {
     validate_config(cfg)?;
-    let mut budget = BuildBudget {
-        next_id: 0,
-        max_decision_nodes,
-    };
+    let mut budget = BuildBudget::new(max_decision_nodes);
     let stack = [cfg.effective_stack, cfg.effective_stack];
     let root = build(
         cfg,
@@ -409,13 +423,25 @@ pub fn build_tree_bounded(cfg: &GameConfig, max_decision_nodes: usize) -> Result
     })
 }
 
-struct BuildBudget {
+pub(super) struct BuildBudget {
     next_id: usize,
     max_decision_nodes: usize,
 }
 
 impl BuildBudget {
-    fn allocate_id(&mut self) -> Result<usize, TreeError> {
+    pub(super) fn new(max_decision_nodes: usize) -> Self {
+        Self {
+            next_id: 0,
+            max_decision_nodes,
+        }
+    }
+
+    /// The number of ids handed out so far.
+    pub(super) fn next_id(&self) -> usize {
+        self.next_id
+    }
+
+    pub(super) fn allocate_id(&mut self) -> Result<usize, TreeError> {
         if self.next_id >= self.max_decision_nodes {
             return Err(TreeError::TooManyDecisionNodes {
                 limit: self.max_decision_nodes,
