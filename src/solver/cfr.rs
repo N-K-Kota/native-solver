@@ -16,10 +16,10 @@
 //!
 //! Sibling subtrees (a decision node's actions, a chance node's dealt
 //! cards) are independent recursions given the strategy at this node, so
-//! they're evaluated in parallel with `rayon`. Each decision node's
-//! regret/strategy tables live behind a `Mutex` to make that safe — actual
-//! contention is near zero, since a node is touched only by the one or two
-//! threads whose branch passes through it.
+//! large ones are evaluated in parallel with `rayon`; small ones run
+//! sequentially in one scratch buffer (see the `engine` module). Each
+//! decision node's regret/strategy tables live behind a `Mutex` to make
+//! that safe. It is never contended: one traversal reaches a node once.
 
 use super::discount::{IterationUpdate, SolverAlgorithm, UpdateSchedule};
 use super::terminal::{BoardOrder, TerminalIndex};
@@ -33,8 +33,12 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+mod engine;
 mod reach_scratch;
-use reach_scratch::ReachScratch;
+
+/// Per player: the groups of bucket indices one board's suit symmetries make
+/// interchangeable.
+type SuitGroups = [Vec<Vec<usize>>; 2];
 
 struct NodeData {
     regret_sum: Vec<Vec<f64>>,
@@ -506,7 +510,7 @@ pub struct SolverGame {
     /// [`evaluate_7`](crate::evaluate_7) scores for every complete (5-card) board reachable via
     /// a `Chance` node, precomputed once so `train()` doesn't recompute
     /// hand strengths for the same board on every iteration.
-    board_eval_cache: HashMap<Vec<Card>, [Vec<u32>; 2]>,
+    board_eval_cache: HashMap<Vec<Card>, Arc<[Vec<u32>; 2]>>,
     /// Per player: `(min(card1,card2), max(card1,card2))` -> index into
     /// `combos[player]`. Used by `chance_value`'s suit-isomorphism
     /// relabeling to look up which combo a suit-swapped combo corresponds
@@ -514,7 +518,7 @@ pub struct SolverGame {
     combo_index: [HashMap<(Card, Card), usize>; 2],
     /// Linear-time card-removal kernels and immutable per-board rank orders.
     terminal_index: TerminalIndex,
-    board_order_cache: HashMap<Vec<Card>, BoardOrder>,
+    board_order_cache: HashMap<Vec<Card>, Arc<BoardOrder>>,
     /// Per-street card abstraction setting this trainer was built with —
     /// see [`CardAbstraction`] and the module doc comment's "card
     /// abstraction" section. `CardAbstraction::default()` never buckets.
@@ -523,7 +527,7 @@ pub struct SolverGame {
     /// `avg_score`, river uses the real [`evaluate_7`](crate::evaluate_7) score), per player:
     /// combo index -> bucket index. Only populated for streets
     /// `abstraction` actually buckets.
-    bucket_maps: HashMap<Vec<Card>, [Vec<usize>; 2]>,
+    bucket_maps: HashMap<Vec<Card>, Arc<[Vec<usize>; 2]>>,
     /// Per player: `0..combos[player].len()`, the fallback "every combo is
     /// its own bucket" mapping used at any node not covered by
     /// `bucket_maps` (a street `abstraction` leaves unbucketed).
@@ -531,13 +535,15 @@ pub struct SolverGame {
     /// Exact board-stabilizing suit orbits in bucket coordinates. Only reduced
     /// trees need this: roundoff must not turn interchangeable hands into
     /// different policies and invalidate representative-only chance traversal.
-    suit_groups: HashMap<Vec<Card>, [Vec<Vec<usize>>; 2]>,
+    suit_groups: HashMap<Vec<Card>, Arc<SuitGroups>>,
     /// Per decision node id: `(acting player index, board at that node)`,
     /// recorded once during `init_node_data` — `average_strategy` needs
     /// this to look up the node's bucket map and expand bucket-level
     /// probabilities back out to the per-combo output the API contract
     /// promises.
     node_meta: Vec<(usize, Vec<Card>)>,
+    /// The tree compiled for the training traversal.
+    plan: engine::Plan,
     #[cfg(test)]
     use_pairwise_terminals: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -707,7 +713,7 @@ impl Trainer {
         if initial_board.len() == 5 {
             board_eval_cache
                 .entry(initial_board.clone())
-                .or_insert_with(|| eval_combos_if_complete(&combos, &initial_board));
+                .or_insert_with(|| Arc::new(eval_combos_if_complete(&combos, &initial_board)));
         }
 
         let combo_index = [build_combo_index(&combos[0]), build_combo_index(&combos[1])];
@@ -718,12 +724,12 @@ impl Trainer {
             .map(|(board, scores)| {
                 (
                     board.clone(),
-                    BoardOrder::new(&combos, scores, mask_of(board)),
+                    Arc::new(BoardOrder::new(&combos, scores, mask_of(board))),
                 )
             })
             .collect();
 
-        let mut bucket_maps: HashMap<Vec<Card>, [Vec<usize>; 2]> = HashMap::new();
+        let mut bucket_maps: HashMap<Vec<Card>, Arc<[Vec<usize>; 2]>> = HashMap::new();
         if let Some(n) = abstraction.river {
             // The cache also holds turn boards (with empty scores); bucketing
             // those would give turn decisions zero buckets.
@@ -734,10 +740,10 @@ impl Trainer {
                 ];
                 bucket_maps.insert(
                     board.clone(),
-                    [
+                    Arc::new([
                         compute_percentile_buckets(&scores_f64[0], n),
                         compute_percentile_buckets(&scores_f64[1], n),
-                    ],
+                    ]),
                 );
             }
         }
@@ -769,10 +775,10 @@ impl Trainer {
                     );
                     bucket_maps.insert(
                         board.clone(),
-                        [
+                        Arc::new([
                             compute_percentile_buckets(&scores[0], n),
                             compute_percentile_buckets(&scores[1], n),
-                        ],
+                        ]),
                     );
                 }
             }
@@ -799,13 +805,15 @@ impl Trainer {
         if has_suit_reduction(&tree.root) {
             for (_, board) in &node_meta {
                 suit_groups.entry(board.clone()).or_insert_with(|| {
-                    let maps = bucket_maps.get(board).unwrap_or(&identity_buckets);
-                    suit_bucket_groups(board, &combos, &combo_index, maps)
+                    let maps = bucket_maps
+                        .get(board)
+                        .map_or(&identity_buckets, |maps| &**maps);
+                    Arc::new(suit_bucket_groups(board, &combos, &combo_index, maps))
                 });
             }
         }
 
-        let game = SolverGame {
+        let mut game = SolverGame {
             tree,
             initial_board,
             combos,
@@ -818,11 +826,13 @@ impl Trainer {
             identity_buckets,
             suit_groups,
             node_meta,
+            plan: engine::Plan::empty(),
             #[cfg(test)]
             use_pairwise_terminals: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             terminal_calls: std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)),
         };
+        game.plan = engine::Plan::build(&game);
         Self {
             game: Arc::new(game),
             algorithm,
@@ -862,20 +872,12 @@ impl Trainer {
     /// Panics if the total iteration count would overflow `u64`.
     pub fn train(&mut self, iterations: u32) -> [f64; 2] {
         let mut last = [0.0, 0.0];
-        // Borrow the shared game, not `self`, so the iteration clock can advance.
-        let game = Arc::clone(&self.game);
-        let board = game.initial_board.clone();
-        let empty_eval = [Vec::new(), Vec::new()];
-        let board_eval = game.board_eval_cache.get(&board).unwrap_or(&empty_eval);
         for step in 0..iterations {
             let iteration = self
                 .iterations_completed
                 .checked_add(1)
                 .expect("CFR iteration counter overflow");
             let update = self.algorithm.iteration(iteration);
-            let reach0: Vec<f64> = self.game.combos[0].iter().map(|c| c.weight).collect();
-            let reach1: Vec<f64> = self.game.combos[1].iter().map(|c| c.weight).collect();
-            let reach = [reach0.as_slice(), reach1.as_slice()];
             let pass = match self.update_schedule {
                 UpdateSchedule::Simultaneous => TrainingPass {
                     update,
@@ -883,17 +885,11 @@ impl Trainer {
                     values: 3,
                 },
                 UpdateSchedule::Alternating => {
-                    self.cfr(
-                        &self.game.tree.root,
-                        reach,
-                        &board,
-                        board_eval,
-                        TrainingPass {
-                            update,
-                            updating: Some(0),
-                            values: 1,
-                        },
-                    );
+                    self.run_pass(TrainingPass {
+                        update,
+                        updating: Some(0),
+                        values: 1,
+                    });
                     // Preserve the exact public train() return on the final IP
                     // pass. Interior iterations need only the learning player's
                     // CFVs; no zero-sum reconstruction or extra traversal.
@@ -904,7 +900,7 @@ impl Trainer {
                     }
                 }
             };
-            let [cfv0, cfv1] = self.cfr(&self.game.tree.root, reach, &board, board_eval, pass);
+            let [cfv0, cfv1] = self.run_pass(pass);
             let ev0: f64 = cfv0
                 .iter()
                 .zip(&self.game.combos[0])
@@ -928,11 +924,19 @@ impl Trainer {
 
     /// Snapshot of the average strategy at this iteration boundary.
     pub fn policy(&self) -> Policy {
-        Policy {
-            rows: (0..self.node_data.len())
+        let nodes = self.node_data.len();
+        let rows = if nodes < 1024 || rayon::current_num_threads() <= 1 {
+            (0..nodes)
                 .map(|id| self.average_bucket_strategy(id))
-                .collect(),
-        }
+                .collect()
+        } else {
+            (0..nodes)
+                .into_par_iter()
+                .with_min_len(256)
+                .map(|id| self.average_bucket_strategy(id))
+                .collect()
+        };
+        Policy { rows }
     }
 
     /// [`SolverGame::evaluate`] under the current average strategy.
@@ -957,317 +961,49 @@ impl Trainer {
 
     /// Normalized strategy sums in bucket coordinates, suit-symmetrized.
     fn average_bucket_strategy(&self, node_id: usize) -> Vec<Vec<f64>> {
-        let (player, board) = &self.game.node_meta[node_id];
-        let (num_buckets, _) = self.game.combo_buckets(*player, board);
         let data = self.node_data[node_id].lock().unwrap();
-        let num_actions = data.regret_sum.len();
-        let mut bucket_strategy: Vec<Vec<f64>> = (0..num_actions)
-            .map(|a| {
-                (0..num_buckets)
-                    .map(|b| {
-                        let total: f64 = (0..num_actions).map(|a2| data.strategy_sum[a2][b]).sum();
-                        if total > 0.0 {
-                            data.strategy_sum[a][b] / total
-                        } else {
-                            1.0 / num_actions as f64
-                        }
-                    })
+        let num_actions = data.strategy_sum.len();
+        let num_buckets = data.strategy_sum.first().map_or(0, Vec::len);
+        // One total per bucket, added in action order.
+        let mut totals = vec![0.0; num_buckets];
+        for row in &data.strategy_sum {
+            for (total, &sum) in totals.iter_mut().zip(row) {
+                *total += sum;
+            }
+        }
+        let uniform = 1.0 / num_actions as f64;
+        let mut bucket_strategy: Vec<Vec<f64>> = data
+            .strategy_sum
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(&totals)
+                    .map(|(&sum, &total)| if total > 0.0 { sum / total } else { uniform })
                     .collect()
             })
             .collect();
+        drop(data);
         self.game.symmetrize_strategy(node_id, &mut bucket_strategy);
         bucket_strategy
     }
 
+    /// The regret-matching strategy the next traversal will play at node `id`.
+    #[cfg(test)]
     fn current_strategy(&self, id: usize, num_actions: usize, num_combos: usize) -> Vec<Vec<f64>> {
-        let data = self.node_data[id].lock().unwrap();
-        let mut strategy = vec![vec![0.0; num_combos]; num_actions];
-        for i in 0..num_combos {
-            let mut total = 0.0;
-            for (regret_row, strat_row) in data.regret_sum.iter().zip(strategy.iter_mut()) {
-                let r = regret_row[i].max(0.0);
-                strat_row[i] = r;
-                total += r;
-            }
-            if total > 0.0 {
-                for row in strategy.iter_mut().take(num_actions) {
-                    row[i] /= total;
-                }
-            } else {
-                for row in strategy.iter_mut().take(num_actions) {
-                    row[i] = 1.0 / num_actions as f64;
-                }
-            }
-        }
-        self.game.symmetrize_strategy(id, &mut strategy);
-        strategy
-    }
-
-    /// Recurse into `node`. Sibling subtrees (a decision's actions, a
-    /// chance node's dealt cards) are independent given the strategy
-    /// fixed at this node, so they run in parallel via rayon; only the
-    /// regret/strategy-sum update at the end takes the node's `Mutex`.
-    fn cfr(
-        &self,
-        node: &Node,
-        reach: [&[f64]; 2],
-        board: &[Card],
-        board_eval: &[Vec<u32>; 2],
-        pass: TrainingPass,
-    ) -> [Vec<f64>; 2] {
-        match node {
-            Node::Terminal(t) => std::array::from_fn(|p| {
-                if pass.computes(p) {
-                    self.game
-                        .terminal_value_for_player(t, p, reach[1 - p], board, board_eval)
-                } else {
-                    Vec::new()
-                }
-            }),
-            Node::Chance { children } => self.chance_value(children, reach, board, pass),
-            Node::Decision {
-                id,
-                player,
-                actions,
-                children,
-            } => {
-                let p = player.index();
-                let num_own_combos = self.game.combos[p].len();
-                let num_other_combos = self.game.combos[1 - p].len();
-                let (num_buckets, buckets) = self.game.combo_buckets(p, board);
-                let strategy = self.current_strategy(*id, actions.len(), num_buckets);
-
-                let child_cfvs: Vec<[Vec<f64>; 2]> = children
-                    .par_iter()
-                    .enumerate()
-                    .map(|(a, child)| {
-                        // This action changes only the acting player's reach.
-                        // Each sibling owns that vector; the unchanged opponent
-                        // slice is shared read-only through the recursive call.
-                        let mut own_reach = ReachScratch::copy_from(reach[p]);
-                        for i in 0..num_own_combos {
-                            own_reach[i] *= strategy[a][buckets[i]];
-                        }
-                        let mut child_reach = reach;
-                        child_reach[p] = &own_reach;
-                        self.cfr(child, child_reach, board, board_eval, pass)
-                    })
-                    .collect();
-
-                let mut own_cfv = vec![0.0; if pass.computes(p) { num_own_combos } else { 0 }];
-                let mut other_cfv = vec![
-                    0.0;
-                    if pass.computes(1 - p) {
-                        num_other_combos
-                    } else {
-                        0
-                    }
-                ];
-                for (a, cfv) in child_cfvs.iter().enumerate() {
-                    let own = &cfv[p];
-                    let other = &cfv[1 - p];
-                    for (i, v) in own_cfv.iter_mut().enumerate() {
-                        *v += strategy[a][buckets[i]] * own[i];
-                    }
-                    for (j, v) in other_cfv.iter_mut().enumerate() {
-                        *v += other[j];
-                    }
-                }
-
-                // A non-updating player's strategy affects the requested CFVs,
-                // but its regrets and strategy mass must remain untouched.
-                if pass.updating.is_some_and(|target| target != p) {
-                    return if p == 0 {
-                        [own_cfv, other_cfv]
-                    } else {
-                        [other_cfv, own_cfv]
-                    };
-                }
-
-                // With no abstraction maps every bucket is exactly combo i.
-                // Its merge weight is one even for zero/board-dead own reach;
-                // terminal CFVs already exclude impossible private deals.
-                // Do not infer this from bucket counts: tied scores can leave
-                // holes in a map while still sharing a bucket.
-                // Board-dead combos add no average-strategy mass, matching the
-                // bucketed path's `effective_reach` below.
-                if self.game.bucket_maps.is_empty() {
-                    let board_set = mask_of(board);
-                    let mut data = self.node_data[*id].lock().unwrap();
-                    for (a, cfv) in child_cfvs.iter().enumerate() {
-                        for (i, &own) in cfv[p].iter().enumerate() {
-                            // Keep the old zero-initialized delta accumulation,
-                            // including its signed-zero behavior.
-                            let delta = 0.0 + (own - own_cfv[i]);
-                            data.regret_sum[a][i] =
-                                pass.update.regret(data.regret_sum[a][i], delta);
-                            if self.game.combos[p][i].bits() & board_set == 0 {
-                                data.strategy_sum[a][i] += reach[p][i] * strategy[a][i];
-                            }
-                            data.strategy_sum[a][i] =
-                                pass.update.strategy_sum(data.strategy_sum[a][i]);
-                        }
-                    }
-                    return if p == 0 {
-                        [own_cfv, other_cfv]
-                    } else {
-                        [other_cfv, own_cfv]
-                    };
-                }
-
-                // `effective_reach` treats a combo whose hole card physically
-                // conflicts with `board` (impossible on this specific
-                // runout — see `eval_combos_if_complete`'s doc comment) as
-                // reach 0 for the bucket-merge weighting and the strategy
-                // sum below, so a phantom combo sharing a bucket with a real
-                // one can never skew the real combo's regret or average. When every combo is
-                // its own bucket (unabstracted, or `river_buckets` capped to
-                // a bijection) each bucket's total is either that one
-                // combo's own reach or — if masked or genuinely zero — falls
-                // through to the equal-weight branch below with a single
-                // member, which reduces exactly to the plain per-combo
-                // regret update this replaces (`own[i] - own_cfv[i]`, no
-                // reach weighting at all), so this is an exact
-                // generalization, not a behavior change, for that case.
-                let board_set = mask_of(board);
-                let effective_reach: Vec<f64> = (0..num_own_combos)
-                    .map(|i| {
-                        let [h1, h2] = self.game.combos[p][i].cards;
-                        if mask_has(board_set, h1) || mask_has(board_set, h2) {
-                            0.0
-                        } else {
-                            reach[p][i]
-                        }
-                    })
-                    .collect();
-                let mut bucket_reach_total = vec![0.0; num_buckets];
-                let mut bucket_size = vec![0usize; num_buckets];
-                for i in 0..num_own_combos {
-                    bucket_reach_total[buckets[i]] += effective_reach[i];
-                    bucket_size[buckets[i]] += 1;
-                }
-
-                {
-                    let mut data = self.node_data[*id].lock().unwrap();
-                    for (a, cfv) in child_cfvs.iter().enumerate() {
-                        let own = &cfv[p];
-                        let mut regret_delta = vec![0.0; num_buckets];
-                        for i in 0..num_own_combos {
-                            let b = buckets[i];
-                            let delta = own[i] - own_cfv[i];
-                            let weight = if bucket_reach_total[b] > 0.0 {
-                                effective_reach[i] / bucket_reach_total[b]
-                            } else {
-                                1.0 / bucket_size[b] as f64
-                            };
-                            regret_delta[b] += weight * delta;
-                            data.strategy_sum[a][b] += effective_reach[i] * strategy[a][b];
-                        }
-                        for (b, delta) in regret_delta.iter().enumerate() {
-                            data.regret_sum[a][b] =
-                                pass.update.regret(data.regret_sum[a][b], *delta);
-                            // Once per bucket, after every combo's contribution:
-                            // never apply DCFR discounting inside the combo loop.
-                            data.strategy_sum[a][b] =
-                                pass.update.strategy_sum(data.strategy_sum[a][b]);
-                        }
-                    }
-                }
-
-                if p == 0 {
-                    [own_cfv, other_cfv]
-                } else {
-                    [other_cfv, own_cfv]
-                }
-            }
-        }
-    }
-
-    /// Average raw `cfv` over every legal next card of each compatible
-    /// private deal. Hero-card conflicts are excluded here; opponent-card
-    /// conflicts are excluded at terminals. Together they leave N - 4
-    /// possible cards, even though the outer vector is hero-combo indexed.
-    ///
-    /// `children` is grouped into suit-isomorphism classes (see
-    /// `tree::deal_classes`): only the class's representative
-    /// (`members[0]`) is actually recursed into. Every other member's
-    /// counterfactual values are derived from the representative's by
-    /// `relabel_cfv` — a swap of the two suits involved is a symmetry of
-    /// the game (it doesn't change tree structure or [`evaluate_7`](crate::evaluate_7)
-    /// outcomes), so member `card`'s cfv for combo `j` equals the
-    /// representative's cfv for the combo obtained by applying that same
-    /// suit swap to combo `j`'s two cards. With isomorphism disabled every
-    /// class is a singleton and this reduces to the original per-card loop.
-    fn chance_value(
-        &self,
-        children: &[(Vec<Card>, Node)],
-        reach: [&[f64]; 2],
-        board: &[Card],
-        pass: TrainingPass,
-    ) -> [Vec<f64>; 2] {
-        let n: usize = children.iter().map(|(members, _)| members.len()).sum();
-        let divisor = (n as f64) - 4.0;
-
-        let class_results: Vec<(&Vec<Card>, [Vec<f64>; 2])> = children
-            .par_iter()
-            .map(|(members, child)| {
-                let rep = members[0];
-                let mut child_board = board.to_vec();
-                child_board.push(rep);
-                let empty_eval = [Vec::new(), Vec::new()];
-                let child_board_eval = self
-                    .game
-                    .board_eval_cache
-                    .get(&child_board)
-                    .unwrap_or(&empty_eval);
-                let child_cfv = self.cfr(child, reach, &child_board, child_board_eval, pass);
-                (members, child_cfv)
-            })
-            .collect();
-
-        let mut out: [Vec<f64>; 2] = std::array::from_fn(|p| {
-            vec![
-                0.0;
-                if pass.computes(p) {
-                    self.game.combos[p].len()
-                } else {
-                    0
-                }
-            ]
-        });
-        for (members, rep_cfv) in &class_results {
-            let rep = members[0];
-            for &card in members.iter() {
-                for p in 0..2 {
-                    if !pass.computes(p) {
-                        continue;
-                    }
-                    let values = if card == rep {
-                        rep_cfv[p].clone()
-                    } else {
-                        self.game
-                            .relabel_cfv(p, &rep_cfv[p], rep.suit(), card.suit())
-                    };
-                    for (
-                        i,
-                        &Combo {
-                            cards: [h1, h2], ..
-                        },
-                    ) in self.game.combos[p].iter().enumerate()
-                    {
-                        if h1 != card && h2 != card {
-                            out[p][i] += values[i];
-                        }
-                    }
-                }
-            }
-        }
-        for values in &mut out {
-            for v in values {
-                *v /= divisor;
-            }
-        }
-        out
+        let (player, board) = &self.game.node_meta[id];
+        let plan = &self.game.plan;
+        let board = plan
+            .boards
+            .iter()
+            .find(|candidate| candidate.cards == *board)
+            .expect("every decision node's board is in the plan");
+        let mut flat = vec![0.0; num_actions * num_combos];
+        let mut totals = vec![0.0; num_combos];
+        assert_eq!(num_combos, board.num_buckets[*player]);
+        self.fill_strategy(id, board, *player, num_actions, &mut flat, &mut totals);
+        (0..num_actions)
+            .map(|a| flat[a * num_combos..(a + 1) * num_combos].to_vec())
+            .collect()
     }
 }
 
@@ -1307,20 +1043,12 @@ impl SolverGame {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn evaluate(&self, policy: &Policy) -> Evaluation {
-        let mut out = HashMap::new();
-        let board = self.initial_board.clone();
-        let empty_eval = [Vec::new(), Vec::new()];
-        let board_eval = self.board_eval_cache.get(&board).unwrap_or(&empty_eval);
+        let out: Vec<std::sync::OnceLock<NodeEvaluation>> = (0..self.node_meta.len())
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
         let reach0: Vec<f64> = self.combos[0].iter().map(|c| c.weight).collect();
         let reach1: Vec<f64> = self.combos[1].iter().map(|c| c.weight).collect();
-        let [cfv0, cfv1] = self.evaluate_node(
-            policy,
-            &self.tree.root,
-            &[reach0, reach1],
-            &board,
-            board_eval,
-            &mut out,
-        );
+        let [cfv0, cfv1] = self.evaluate_plan(policy, [&reach0, &reach1], &out);
         let ev0: f64 = cfv0
             .iter()
             .zip(&self.combos[0])
@@ -1332,8 +1060,9 @@ impl SolverGame {
             .map(|(v, c)| v * c.weight)
             .sum();
         // `evaluate_node` visits every decision node exactly once.
-        let nodes = (0..self.node_meta.len())
-            .map(|id| out.remove(&id).expect("every decision node is evaluated"))
+        let nodes = out
+            .into_iter()
+            .map(|node| node.into_inner().expect("every decision node is evaluated"))
             .collect();
         Evaluation {
             nodes,
@@ -1346,16 +1075,14 @@ impl SolverGame {
     /// Runs one best-response pass for each player against the other's policy; see
     /// [`Exploitability`] for the definition.
     pub fn exploitability(&self, policy: &Policy) -> Exploitability {
-        let board = self.initial_board.clone();
-        let empty_eval = [Vec::new(), Vec::new()];
-        let board_eval = self.board_eval_cache.get(&board).unwrap_or(&empty_eval);
+        let board = &self.initial_board;
         let reach0: Vec<f64> = self.combos[0].iter().map(|c| c.weight).collect();
         let reach1: Vec<f64> = self.combos[1].iter().map(|c| c.weight).collect();
 
         // CFVs remain unnormalized throughout recursion. Only the public
         // metric is an expectation over legal initial deals, rather than a
         // sum that changes with the size or common scale of either range.
-        let board_set = mask_of(&board);
+        let board_set = mask_of(board);
         let live = |c: &Combo| !mask_has(board_set, c.cards[0]) && !mask_has(board_set, c.cards[1]);
         let compatible_mass =
             self.terminal_index
@@ -1374,22 +1101,8 @@ impl SolverGame {
             };
         }
 
-        let br0 = self.best_response_value(
-            policy,
-            &self.tree.root,
-            0,
-            &[reach0.clone(), reach1.clone()],
-            &board,
-            board_eval,
-        );
-        let br1 = self.best_response_value(
-            policy,
-            &self.tree.root,
-            1,
-            &[reach0, reach1],
-            &board,
-            board_eval,
-        );
+        let br0 = self.best_response(policy, 0, &reach1);
+        let br1 = self.best_response(policy, 1, &reach0);
         let oop = br0
             .iter()
             .zip(&self.combos[0])
@@ -1542,7 +1255,7 @@ impl SolverGame {
         let mut maps: Vec<_> = self
             .bucket_maps
             .iter()
-            .map(|(board, maps)| (board.as_slice(), maps))
+            .map(|(board, maps)| (board.as_slice(), &**maps))
             .collect();
         maps.sort_unstable_by(|a, b| a.0.cmp(b.0));
         maps
@@ -1577,6 +1290,7 @@ impl SolverGame {
     /// the rest of the board), so combo `j`'s cfv under the `suit_b`
     /// version equals the representative's cfv for whichever combo `j`
     /// becomes after swapping its two cards' suits.
+    #[cfg(test)]
     fn relabel_cfv(&self, player: usize, rep_cfv: &[f64], suit_a: u8, suit_b: u8) -> Vec<f64> {
         self.combos[player]
             .iter()
@@ -1593,409 +1307,7 @@ impl SolverGame {
             .collect()
     }
 
-    /// `evaluate()`'s recursion — mirrors `cfr()`'s structure (same
-    /// [`Terminal`]/`Chance`/`Decision` handling), but reads the fixed
-    /// `average_strategy` at each decision node instead of computing a
-    /// "current" one via regret matching, and never touches `node_data`.
-    /// `terminal_value` doesn't need a parallel version — it's already
-    /// policy-agnostic, depending only on the `reach` and `board_eval`
-    /// threaded down to it, not on how the strategy that produced `reach`
-    /// was obtained.
-    ///
-    /// `average_strategy` already expands any river/flop/turn bucketing
-    /// back out to one probability per real combo (see its own doc
-    /// comment), so — unlike `cfr()`'s training branch — this never needs
-    /// bucket-aware weighting: every combo's regret/EV here is already
-    /// fully independent, matching the pre-abstraction per-combo design.
-    fn evaluate_node(
-        &self,
-        policy: &Policy,
-        node: &Node,
-        reach: &[Vec<f64>; 2],
-        board: &[Card],
-        board_eval: &[Vec<u32>; 2],
-        out: &mut HashMap<usize, NodeEvaluation>,
-    ) -> [Vec<f64>; 2] {
-        match node {
-            Node::Terminal(t) => self.terminal_value(t, reach, board, board_eval),
-            Node::Chance { children } => {
-                self.evaluate_chance_value(policy, children, reach, board, out)
-            }
-            Node::Decision {
-                id,
-                player,
-                children,
-                ..
-            } => {
-                let p = player.index();
-                let num_own_combos = self.combos[p].len();
-                let num_other_combos = self.combos[1 - p].len();
-                let strategy = self.average_strategy(policy, *id);
-
-                let child_cfvs: Vec<[Vec<f64>; 2]> = children
-                    .iter()
-                    .enumerate()
-                    .map(|(a, child)| {
-                        let mut child_reach = reach.clone();
-                        for i in 0..num_own_combos {
-                            child_reach[p][i] *= strategy[a][i];
-                        }
-                        self.evaluate_node(policy, child, &child_reach, board, board_eval, out)
-                    })
-                    .collect();
-
-                let mut own_ev = vec![0.0; num_own_combos];
-                let mut other_ev = vec![0.0; num_other_combos];
-                for (a, cfv) in child_cfvs.iter().enumerate() {
-                    let own = &cfv[p];
-                    let other = &cfv[1 - p];
-                    for i in 0..num_own_combos {
-                        own_ev[i] += strategy[a][i] * own[i];
-                    }
-                    for (j, v) in other_ev.iter_mut().enumerate() {
-                        *v += other[j];
-                    }
-                }
-
-                let equity = if board.len() == 5 {
-                    Some(self.equity_at_node(p, reach, board, board_eval))
-                } else {
-                    None
-                };
-
-                // `own_ev` here is still a raw counterfactual value: a SUM
-                // weighted by the opponent's *unnormalized* reach across all
-                // their live combos (the convention used throughout this
-                // module — see `showdown_cfv`/`terminal_value`/`chance_value`),
-                // not a human-meaningful "expected value of holding this
-                // exact combo". By CFR's `v(I) = pi_{-i}(I) * u_i(sigma|I)`
-                // identity, dividing by the opponent's total live reach
-                // (`non_conflicting_reach_sum`, the same board/hand-blocking
-                // exclusion `equity_at_node` already applies) recovers the
-                // true per-combo expected value for display. Only the
-                // *stored* value is normalized this way — the *returned*
-                // own_ev/other_ev must stay in the raw convention so the
-                // parent's own weighted-sum aggregation and the chance-node
-                // relabeling stay correct.
-                let board_set = mask_of(board);
-                let compatible_mass =
-                    self.terminal_index
-                        .compatible_mass(&self.combos, p, &reach[1 - p], board_set);
-                let display_ev: Vec<f64> = (0..num_own_combos)
-                    .map(|i| {
-                        let denom = compatible_mass[i];
-                        if denom > 0.0 {
-                            own_ev[i] / denom
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-                out.insert(
-                    *id,
-                    NodeEvaluation {
-                        ev: display_ev,
-                        equity,
-                    },
-                );
-
-                if p == 0 {
-                    [own_ev, other_ev]
-                } else {
-                    [other_ev, own_ev]
-                }
-            }
-        }
-    }
-
-    /// `evaluate_node`'s counterpart to `chance_value`: same
-    /// suit-isomorphism relabeling (see that function's doc comment for
-    /// why a class's non-representative members can't just reuse the
-    /// representative's own values unchanged), but recursing via
-    /// `evaluate_node` instead of `cfr`.
-    fn evaluate_chance_value(
-        &self,
-        policy: &Policy,
-        children: &[(Vec<Card>, Node)],
-        reach: &[Vec<f64>; 2],
-        board: &[Card],
-        out: &mut HashMap<usize, NodeEvaluation>,
-    ) -> [Vec<f64>; 2] {
-        let n: usize = children.iter().map(|(members, _)| members.len()).sum();
-        let divisor = (n as f64) - 4.0;
-
-        let class_results: Vec<(&Vec<Card>, [Vec<f64>; 2])> = children
-            .iter()
-            .map(|(members, child)| {
-                let rep = members[0];
-                let mut child_board = board.to_vec();
-                child_board.push(rep);
-                let empty_eval = [Vec::new(), Vec::new()];
-                let child_board_eval = self
-                    .board_eval_cache
-                    .get(&child_board)
-                    .unwrap_or(&empty_eval);
-                let child_cfv =
-                    self.evaluate_node(policy, child, reach, &child_board, child_board_eval, out);
-                (members, child_cfv)
-            })
-            .collect();
-
-        let mut cfv0 = vec![0.0; self.combos[0].len()];
-        let mut cfv1 = vec![0.0; self.combos[1].len()];
-
-        for (members, rep_cfv) in &class_results {
-            let rep = members[0];
-            for &card in members.iter() {
-                let (cfv0_card, cfv1_card) = if card == rep {
-                    (rep_cfv[0].clone(), rep_cfv[1].clone())
-                } else {
-                    (
-                        self.relabel_cfv(0, &rep_cfv[0], rep.suit(), card.suit()),
-                        self.relabel_cfv(1, &rep_cfv[1], rep.suit(), card.suit()),
-                    )
-                };
-                for (
-                    i,
-                    &Combo {
-                        cards: [h1, h2], ..
-                    },
-                ) in self.combos[0].iter().enumerate()
-                {
-                    if h1 != card && h2 != card {
-                        cfv0[i] += cfv0_card[i];
-                    }
-                }
-                for (
-                    j,
-                    &Combo {
-                        cards: [h1, h2], ..
-                    },
-                ) in self.combos[1].iter().enumerate()
-                {
-                    if h1 != card && h2 != card {
-                        cfv1[j] += cfv1_card[j];
-                    }
-                }
-            }
-        }
-
-        for v in &mut cfv0 {
-            *v /= divisor;
-        }
-        for v in &mut cfv1 {
-            *v /= divisor;
-        }
-        [cfv0, cfv1]
-    }
-
-    /// One player (`x`)'s counterfactual value when `x` plays a perfect
-    /// best response — for each of `x`'s own combos independently, the
-    /// single action maximizing that combo's value, no mixing — against the
-    /// *other* player's fixed `average_strategy` everywhere else in the
-    /// tree. Structurally this is `evaluate_node` specialized to only ever
-    /// report `x`'s own side: at a decision node belonging to the other
-    /// player, it's exactly `evaluate_node`'s "other" (non-acting) output,
-    /// since that's already an unweighted sum across actions (the
-    /// opponent's `average_strategy` weighting is baked in via the
-    /// `child_reach` scaling before recursing, same as there); at `x`'s own
-    /// decision nodes, the analogous weighted-average is replaced with a
-    /// per-combo `max` over the actions' returned values. `terminal_value`
-    /// is reused unchanged (policy-agnostic, see `evaluate_node`'s doc
-    /// comment) and `x`'s own reach is threaded down unmodified at `x`'s own
-    /// nodes — `terminal_value` never reads a player's *own* reach for that
-    /// player's own cfv (only the opponent's, to weight how likely the
-    /// opponent was to actually play into this node — see
-    /// `non_conflicting_reach_sum`'s callers), so unlike `evaluate_node`,
-    /// which needs both sides' cfv and hence both sides' reach scaled
-    /// correctly, this only ever needs the *non-deviating* player's reach
-    /// threaded correctly.
-    fn best_response_value(
-        &self,
-        policy: &Policy,
-        node: &Node,
-        x: usize,
-        reach: &[Vec<f64>; 2],
-        board: &[Card],
-        board_eval: &[Vec<u32>; 2],
-    ) -> Vec<f64> {
-        match node {
-            Node::Terminal(t) => {
-                self.terminal_value_for_player(t, x, &reach[1 - x], board, board_eval)
-            }
-            Node::Chance { children } => {
-                self.best_response_chance_value(policy, children, x, reach, board)
-            }
-            Node::Decision {
-                id,
-                player,
-                children,
-                ..
-            } => {
-                let p = player.index();
-                if p == x {
-                    let num_own_combos = self.combos[x].len();
-                    let child_vals: Vec<Vec<f64>> = children
-                        .par_iter()
-                        .map(|child| {
-                            self.best_response_value(policy, child, x, reach, board, board_eval)
-                        })
-                        .collect();
-                    (0..num_own_combos)
-                        .map(|i| {
-                            child_vals
-                                .iter()
-                                .map(|v| v[i])
-                                .fold(f64::NEG_INFINITY, f64::max)
-                        })
-                        .collect()
-                } else {
-                    let num_opp_combos = self.combos[p].len();
-                    let strategy = self.average_strategy(policy, *id);
-                    let child_vals: Vec<Vec<f64>> = children
-                        .par_iter()
-                        .enumerate()
-                        .map(|(a, child)| {
-                            let mut child_reach = reach.clone();
-                            for i in 0..num_opp_combos {
-                                child_reach[p][i] *= strategy[a][i];
-                            }
-                            self.best_response_value(
-                                policy,
-                                child,
-                                x,
-                                &child_reach,
-                                board,
-                                board_eval,
-                            )
-                        })
-                        .collect();
-                    let num_own_combos = self.combos[x].len();
-                    let mut out = vec![0.0; num_own_combos];
-                    for v in &child_vals {
-                        for (i, val) in v.iter().enumerate() {
-                            out[i] += val;
-                        }
-                    }
-                    out
-                }
-            }
-        }
-    }
-
-    /// `best_response_value`'s counterpart to `chance_value`/
-    /// `evaluate_chance_value`: same suit-isomorphism relabeling (only the
-    /// class representative is actually recursed into; other members reuse
-    /// `relabel_cfv`), specialized to the single player `x` whose
-    /// best-response value this whole pass tracks.
-    fn best_response_chance_value(
-        &self,
-        policy: &Policy,
-        children: &[(Vec<Card>, Node)],
-        x: usize,
-        reach: &[Vec<f64>; 2],
-        board: &[Card],
-    ) -> Vec<f64> {
-        let n: usize = children.iter().map(|(members, _)| members.len()).sum();
-        let divisor = (n as f64) - 4.0;
-
-        let class_results: Vec<(&Vec<Card>, Vec<f64>)> = children
-            .par_iter()
-            .map(|(members, child)| {
-                let rep = members[0];
-                let mut child_board = board.to_vec();
-                child_board.push(rep);
-                let empty_eval = [Vec::new(), Vec::new()];
-                let child_board_eval = self
-                    .board_eval_cache
-                    .get(&child_board)
-                    .unwrap_or(&empty_eval);
-                let child_val = self.best_response_value(
-                    policy,
-                    child,
-                    x,
-                    reach,
-                    &child_board,
-                    child_board_eval,
-                );
-                (members, child_val)
-            })
-            .collect();
-
-        let mut out = vec![0.0; self.combos[x].len()];
-        for (members, rep_val) in &class_results {
-            let rep = members[0];
-            for &card in members.iter() {
-                let val_card = if card == rep {
-                    rep_val.clone()
-                } else {
-                    self.relabel_cfv(x, rep_val, rep.suit(), card.suit())
-                };
-                for (
-                    i,
-                    &Combo {
-                        cards: [h1, h2], ..
-                    },
-                ) in self.combos[x].iter().enumerate()
-                {
-                    if h1 != card && h2 != card {
-                        out[i] += val_card[i];
-                    }
-                }
-            }
-        }
-        for v in &mut out {
-            *v /= divisor;
-        }
-        out
-    }
-
-    /// Raw showdown win probability for each of `player`'s combos against
-    /// the opponent's `reach`-weighted range at this node — only valid
-    /// (and only ever called) once `board_eval` is a complete board's real
-    /// [`evaluate_7`](crate::evaluate_7) scores. Excludes opponent combos blocked by the hero's
-    /// own two cards *and* ones that physically conflict with the board
-    /// (same exclusion `showdown_cfv` uses — without it, a phantom
-    /// opponent combo could still be assigned nonzero weight here even
-    /// though `reach` was never masked for it, since that masking only
-    /// ever happens inside bucket-merge aggregation during training, not
-    /// in this reach vector itself).
-    fn equity_at_node(
-        &self,
-        player: usize,
-        reach: &[Vec<f64>; 2],
-        board: &[Card],
-        board_eval: &[Vec<u32>; 2],
-    ) -> Vec<f64> {
-        let board_set = mask_of(board);
-        let positive_reach: Vec<f64> = reach[1 - player]
-            .iter()
-            .map(|&r| if r <= 0.0 { 0.0 } else { r })
-            .collect();
-        let mass =
-            self.terminal_index
-                .compatible_mass(&self.combos, player, &positive_reach, board_set);
-        let net = self.terminal_index.showdown(
-            &self.combos,
-            player,
-            &positive_reach,
-            board_eval,
-            &self.board_order_cache[board],
-            board_set,
-            &[1.0, 1.0],
-        );
-        net.iter()
-            .zip(mass)
-            .map(|(net, mass)| {
-                if mass > 0.0 {
-                    0.5 + 0.5 * net / mass
-                } else {
-                    0.5
-                }
-            })
-            .collect()
-    }
-
+    #[cfg(test)]
     fn terminal_value(
         &self,
         t: &Terminal,
@@ -2009,6 +1321,7 @@ impl SolverGame {
         ]
     }
 
+    #[cfg(test)]
     fn terminal_value_for_player(
         &self,
         t: &Terminal,
@@ -2017,20 +1330,44 @@ impl SolverGame {
         board: &[Card],
         board_eval: &[Vec<u32>; 2],
     ) -> Vec<f64> {
+        let mut out = vec![0.0; self.combos[player].len()];
+        self.terminal_into(
+            t,
+            player,
+            reach_opp,
+            mask_of(board),
+            board_eval,
+            self.board_order_cache.get(board).map(|order| &**order),
+            &mut out,
+        );
+        out
+    }
+
+    /// `player`'s raw terminal values written over `out`, one per combo.
+    /// `order` is the board's rank order; every showdown board has one.
+    #[allow(clippy::too_many_arguments)]
+    fn terminal_into(
+        &self,
+        t: &Terminal,
+        player: usize,
+        reach_opp: &[f64],
+        board_set: u64,
+        board_eval: &[Vec<u32>; 2],
+        order: Option<&BoardOrder>,
+        out: &mut [f64],
+    ) {
         #[cfg(test)]
         self.terminal_calls[player].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let board_set = mask_of(board);
         #[cfg(test)]
         if self
             .use_pairwise_terminals
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            return (0..self.combos[player].len())
-                .map(|i| {
-                    let [a, b] = self.combos[player][i].cards;
-                    if mask_has(board_set, a) || mask_has(board_set, b) {
-                        return 0.0;
-                    }
+            for (i, out) in out.iter_mut().enumerate() {
+                let [a, b] = self.combos[player][i].cards;
+                *out = if mask_has(board_set, a) || mask_has(board_set, b) {
+                    0.0
+                } else {
                     match t {
                         Terminal::Fold { winner, invested } => {
                             let value = if winner.index() == player {
@@ -2044,8 +1381,9 @@ impl SolverGame {
                             self.showdown_cfv(player, i, invested, reach_opp, board_eval, board_set)
                         }
                     }
-                })
-                .collect();
+                };
+            }
+            return;
         }
         match t {
             Terminal::Fold { winner, invested } => {
@@ -2054,20 +1392,26 @@ impl SolverGame {
                 } else {
                     -invested[player]
                 };
-                self.terminal_index
-                    .compatible_mass(&self.combos, player, reach_opp, board_set)
-                    .into_iter()
-                    .map(|mass| value * mass)
-                    .collect()
+                self.terminal_index.compatible_mass_into(
+                    &self.combos,
+                    player,
+                    reach_opp,
+                    board_set,
+                    out,
+                );
+                for mass in out.iter_mut() {
+                    *mass *= value;
+                }
             }
-            Terminal::Showdown { invested } => self.terminal_index.showdown(
+            Terminal::Showdown { invested } => self.terminal_index.showdown_into(
                 &self.combos,
                 player,
                 reach_opp,
                 board_eval,
-                &self.board_order_cache[board],
+                order.expect("every showdown board has a rank order"),
                 board_set,
                 invested,
+                out,
             ),
         }
     }
@@ -2241,7 +1585,7 @@ fn precompute_board_eval(
     node: &Node,
     board: &[Card],
     combos: &[Vec<Combo>; 2],
-    cache: &mut HashMap<Vec<Card>, [Vec<u32>; 2]>,
+    cache: &mut HashMap<Vec<Card>, Arc<[Vec<u32>; 2]>>,
 ) {
     match node {
         Node::Decision { children, .. } => {
@@ -2259,7 +1603,7 @@ fn precompute_board_eval(
                 child_board.push(rep);
                 cache
                     .entry(child_board.clone())
-                    .or_insert_with(|| eval_combos_if_complete(combos, &child_board));
+                    .or_insert_with(|| Arc::new(eval_combos_if_complete(combos, &child_board)));
                 precompute_board_eval(child, &child_board, combos, cache);
             }
         }
@@ -2354,7 +1698,7 @@ fn avg_score(
     board: &[Card],
     combos: &[Vec<Combo>; 2],
     combo_index: &[HashMap<(Card, Card), usize>; 2],
-    board_eval_cache: &HashMap<Vec<Card>, [Vec<u32>; 2]>,
+    board_eval_cache: &HashMap<Vec<Card>, Arc<[Vec<u32>; 2]>>,
     cache: &mut HashMap<Vec<Card>, [Vec<f64>; 2]>,
 ) -> [Vec<f64>; 2] {
     if let Some(v) = cache.get(board) {
@@ -2362,7 +1706,7 @@ fn avg_score(
     }
     let result = if board.len() == 5 {
         let scores = match board_eval_cache.get(board) {
-            Some(scores) => scores.clone(),
+            Some(scores) => (**scores).clone(),
             None => eval_combos_if_complete(combos, board),
         };
         [
@@ -2434,7 +1778,7 @@ fn avg_score(
 fn bucket_count_and_map<'a>(
     player: usize,
     board: &[Card],
-    bucket_maps: &'a HashMap<Vec<Card>, [Vec<usize>; 2]>,
+    bucket_maps: &'a HashMap<Vec<Card>, Arc<[Vec<usize>; 2]>>,
     identity_buckets: &'a [Vec<usize>; 2],
 ) -> (usize, &'a [usize]) {
     match bucket_maps.get(board) {
@@ -2454,7 +1798,7 @@ fn bucket_count_and_map<'a>(
 fn init_node_data(
     node: &Node,
     board: &[Card],
-    bucket_maps: &HashMap<Vec<Card>, [Vec<usize>; 2]>,
+    bucket_maps: &HashMap<Vec<Card>, Arc<[Vec<usize>; 2]>>,
     identity_buckets: &[Vec<usize>; 2],
     out: &mut [NodeData],
     node_meta: &mut [(usize, Vec<Card>)],

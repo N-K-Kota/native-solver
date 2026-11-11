@@ -356,6 +356,7 @@ pub(crate) fn score_5(cards: [Card; 5]) -> u32 {
 }
 
 /// All 21 ways to choose 5 indices out of 7.
+#[cfg(test)]
 const COMBOS_7_CHOOSE_5: [[usize; 5]; 21] = [
     [0, 1, 2, 3, 4],
     [0, 1, 2, 3, 5],
@@ -389,8 +390,97 @@ pub fn evaluate_7(cards: [Card; 7]) -> HandStrength {
     HandStrength(score_7(cards))
 }
 
+/// The highest set bit of a non-empty 13-bit rank mask, as a rank.
+fn top_rank(mask: u16) -> u32 {
+    15 - mask.leading_zeros()
+}
+
+/// Packs the `count` highest ranks of `mask`, highest first, starting at
+/// nibble `first` of the tiebreak (nibble 0 is the most significant).
+fn pack_top_ranks(mut mask: u16, count: usize, first: usize) -> u32 {
+    let mut bits = 0;
+    for i in first..first + count {
+        let rank = top_rank(mask);
+        bits |= rank << (16 - i * 4);
+        mask &= !(1 << rank);
+    }
+    bits
+}
+
+/// The high card of the best straight among the ranks of `mask`, if any.
+/// The wheel (A-2-3-4-5) counts as five-high.
+fn best_straight_high(mask: u16) -> Option<u32> {
+    // Bit 0 is the ace playing low; rank `r` sits at bit `r + 1`.
+    let low_ace = (mask << 1) | (mask >> 12 & 1);
+    let runs = low_ace & low_ace >> 1 & low_ace >> 2 & low_ace >> 3 & low_ace >> 4;
+    // A run starting at bit `i` ends on rank `i + 3`.
+    (runs != 0).then(|| top_rank(runs) + 3)
+}
+
 /// [`evaluate_7`] as a raw score, for the solver's hot paths.
+///
+/// Reads the best five-card hand directly from rank and suit counts. Equal to
+/// the maximum of [`score_5`] over all 21 five-card subsets.
 pub(crate) fn score_7(cards: [Card; 7]) -> u32 {
+    let mut suits = [0u16; 4];
+    // Ranks held at least once, twice, three and four times.
+    let (mut any, mut pairs, mut trips, mut quads) = (0u16, 0u16, 0u16, 0u16);
+    for card in cards {
+        let bit = 1u16 << card.rank();
+        suits[card.suit() as usize] |= bit;
+        quads |= trips & bit;
+        trips |= pairs & bit;
+        pairs |= any & bit;
+        any |= bit;
+    }
+
+    // Five cards of one suit leave room for at most one more card of any of
+    // their ranks plus one other, so a flush rules out quads and full houses.
+    for flush in suits {
+        if flush.count_ones() >= 5 {
+            return match best_straight_high(flush) {
+                Some(high) => (CAT_STRAIGHT_FLUSH << 20) | (high << 16),
+                None => (CAT_FLUSH << 20) | pack_top_ranks(flush, 5, 0),
+            };
+        }
+    }
+    if quads != 0 {
+        let quad = top_rank(quads);
+        return (CAT_FOUR_KIND << 20) | (quad << 16) | pack_top_ranks(any & !(1 << quad), 1, 1);
+    }
+    if trips != 0 {
+        let trip = top_rank(trips);
+        let others = pairs & !(1 << trip);
+        if others != 0 {
+            return (CAT_FULL_HOUSE << 20) | (trip << 16) | (top_rank(others) << 12);
+        }
+    }
+    if let Some(high) = best_straight_high(any) {
+        return (CAT_STRAIGHT << 20) | (high << 16);
+    }
+    if trips != 0 {
+        let trip = top_rank(trips);
+        return (CAT_THREE_KIND << 20) | (trip << 16) | pack_top_ranks(any & !(1 << trip), 2, 1);
+    }
+    if pairs != 0 {
+        let high = top_rank(pairs);
+        let lower = pairs & !(1 << high);
+        if lower != 0 {
+            let low = top_rank(lower);
+            let kickers = any & !(1 << high) & !(1 << low);
+            return (CAT_TWO_PAIR << 20)
+                | (high << 16)
+                | (low << 12)
+                | pack_top_ranks(kickers, 1, 2);
+        }
+        return (CAT_PAIR << 20) | (high << 16) | pack_top_ranks(any & !(1 << high), 3, 1);
+    }
+    (CAT_HIGH_CARD << 20) | pack_top_ranks(any, 5, 0)
+}
+
+/// [`score_7`] as originally defined: the best of all 21 five-card subsets.
+#[cfg(test)]
+fn score_7_reference(cards: [Card; 7]) -> u32 {
     COMBOS_7_CHOOSE_5
         .iter()
         .map(|combo| {
@@ -426,6 +516,77 @@ mod tests {
             .map(|c| c.parse::<Card>().unwrap())
             .collect();
         parsed.try_into().unwrap()
+    }
+
+    /// Visits every 7-card hand whose lowest card index is `offset`, or
+    /// `offset` plus a multiple of `stride`.
+    fn for_each_7_card_hand(stride: u8, offset: u8, mut visit: impl FnMut([Card; 7])) {
+        for a in (offset..52).step_by(stride as usize) {
+            for b in a + 1..52 {
+                for c in b + 1..52 {
+                    for d in c + 1..52 {
+                        for e in d + 1..52 {
+                            for f in e + 1..52 {
+                                for g in f + 1..52 {
+                                    visit([a, b, c, d, e, f, g].map(Card));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_7_matches_best_of_21_on_a_sample() {
+        // Every 61st hand of the full enumeration: about two million.
+        let (mut index, mut checked) = (0u32, 0u32);
+        for offset in 0..46 {
+            for_each_7_card_hand(52, offset, |hand| {
+                if index % 61 == 0 {
+                    assert_eq!(score_7(hand), score_7_reference(hand), "{hand:?}");
+                    checked += 1;
+                }
+                index += 1;
+            });
+        }
+        assert_eq!(index, 133_784_560);
+        assert_eq!(checked, 2_193_190);
+    }
+
+    #[test]
+    fn evaluate_7_does_not_depend_on_card_order() {
+        let hand = hand7("As Ah Kd Kc 7s 7d 2c");
+        let expected = score_7_reference(hand);
+        let mut rotated = hand;
+        for _ in 0..7 {
+            rotated.rotate_left(1);
+            assert_eq!(score_7(rotated), expected);
+            let mut swapped = rotated;
+            swapped.swap(0, 4);
+            assert_eq!(score_7(swapped), expected);
+        }
+    }
+
+    /// All 133,784,560 hands; about a minute of CPU time. Run with
+    /// `cargo test --release evaluate_7_matches_best_of_21_for_every_hand -- --ignored`.
+    #[test]
+    #[ignore = "exhaustive: about a minute of CPU time"]
+    fn evaluate_7_matches_best_of_21_for_every_hand() {
+        use rayon::prelude::*;
+        let hands: u64 = (0u8..46)
+            .into_par_iter()
+            .map(|offset| {
+                let mut hands = 0u64;
+                for_each_7_card_hand(52, offset, |hand| {
+                    assert_eq!(score_7(hand), score_7_reference(hand), "{hand:?}");
+                    hands += 1;
+                });
+                hands
+            })
+            .sum();
+        assert_eq!(hands, 133_784_560);
     }
 
     #[test]

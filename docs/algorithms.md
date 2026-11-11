@@ -19,9 +19,22 @@ Terminal values come from sums over the opponent's combos with card removal:
   subtraction would lose a tiny compatible reach to rounding, the code falls
   back to a direct sum.
 
-Sibling subtrees (a node's actions, a chance node's cards) are evaluated in
-parallel with `rayon`. Each decision node's tables are behind their own
-`Mutex`, which only the threads passing through that node touch.
+## Traversal
+
+`Trainer::new` compiles the tree once into a flat plan. Each node refers to
+its board's caches (hand scores, rank order, buckets, suit groups) by index,
+so a traversal never hashes a board, and each subtree records how much
+scratch space and roughly how much work it needs.
+
+Sibling subtrees (a node's actions, a chance node's cards) are independent
+given the strategy at their parent. Large ones are evaluated in parallel with
+`rayon`. A subtree below a fixed work estimate runs sequentially inside one
+preallocated scratch buffer, with no allocation and no task per node; a Rayon
+task would cost more than the subtree does. Each decision node's tables are
+behind their own `Mutex`, which only the one traversal path through that node
+locks.
+
+Training, best response (`exploitability`), and `evaluate` share this plan.
 
 ## Update rules
 
@@ -74,5 +87,5 @@ snapshot. The restored policy reads bit-identically.
 order. Results depend on the order of floating-point operations: reordering
 combos or swapping the two cards inside a combo can change the last bits.
 The thread count does not: each decision node is updated once per pass, by
-the one traversal path that reaches it, and parallel child values are
-combined in a fixed order.
+the one traversal path that reaches it, and child values are combined in a
+fixed order whether the children ran in parallel or sequentially.

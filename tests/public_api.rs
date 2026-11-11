@@ -194,3 +194,33 @@ fn public_types_have_informative_debug_and_hash() {
     let options: HashSet<TrainerOptions> = [TrainerOptions::default(); 2].into_iter().collect();
     assert_eq!(options.len(), 1);
 }
+
+/// A policy belongs to the game it was taken from. Reading another game with
+/// it must fail loudly, not return numbers.
+#[test]
+#[should_panic]
+fn a_policy_from_a_smaller_game_is_rejected_by_evaluate() {
+    let board: Vec<Card> = ["Ks", "Th", "7s", "4d", "2s"]
+        .iter()
+        .map(|card| card.parse().unwrap())
+        .collect();
+    let dead = CardSet::from_cards(&board);
+    let trainer = |oop: &str| {
+        let config = native_solver::GameConfig::new(
+            board.clone(),
+            native_solver::Chips::whole(100),
+            native_solver::Chips::whole(100),
+        )
+        .with_bet_sizes([1.0]);
+        let ranges = [oop, "QQ,JJ"].map(|range| range.parse::<Range>().unwrap().combos(dead));
+        native_solver::Trainer::new(
+            native_solver::build_tree(&config).unwrap(),
+            ranges,
+            native_solver::TrainerOptions::default(),
+        )
+        .unwrap()
+    };
+    let small = trainer("AA");
+    let large = trainer("AA,KQs,T9s");
+    large.game().evaluate(&small.policy());
+}
