@@ -18,7 +18,7 @@ A heads-up postflop No-Limit Hold'em solver in Rust. It includes:
 cargo add native-solver
 ```
 
-Or add `native-solver = "0.1"` under `[dependencies]` in `Cargo.toml`.
+Or add `native-solver = "0.2"` under `[dependencies]` in `Cargo.toml`.
 
 ## Example
 

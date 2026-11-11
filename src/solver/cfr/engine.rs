@@ -367,6 +367,9 @@ fn accumulate_card(
 fn scale_reach(child: &mut [f64], reach: &[f64], row: &[f64], buckets: Option<&[usize]>) {
     match buckets {
         None => {
+            // Slicing panics on a row that is too short (a policy from a
+            // different game) instead of leaving stale scratch behind it.
+            let row = &row[..reach.len()];
             for ((child, &reach), &probability) in child.iter_mut().zip(reach).zip(row) {
                 *child = reach * probability;
             }
@@ -383,6 +386,7 @@ fn scale_reach(child: &mut [f64], reach: &[f64], row: &[f64], buckets: Option<&[
 fn add_weighted(own: &mut [f64], row: &[f64], child: &[f64], buckets: Option<&[usize]>) {
     match buckets {
         None => {
+            let row = &row[..own.len()];
             for ((own, &child), &probability) in own.iter_mut().zip(child).zip(row) {
                 *own += probability * child;
             }

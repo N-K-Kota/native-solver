@@ -147,8 +147,11 @@ impl ReachMass {
     fn cancellation_prone(&self, value: f64) -> bool {
         // With at most 1024 entries the limit is below `|total| / 32`
         // (8 * EPSILON * 1024 / 1e-10 < 0.02), so a value well above that is
-        // never prone and the division can be skipped.
-        if self.support <= 1024 && value * 32.0 > self.total.abs() {
+        // never prone and the division can be skipped. The lower bound on
+        // the total keeps the error bound far from the subnormal range,
+        // where its rounding could push the limit past `|total| / 32`.
+        let total = self.total.abs();
+        if self.support <= 1024 && total > 1e-290 && value * 32.0 > total {
             return false;
         }
         value <= self.cancellation_limit()
