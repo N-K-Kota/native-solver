@@ -257,7 +257,8 @@ impl RunoutEdge {
     pub(crate) fn apply(&self, player: usize, reach: &[f64], out: &mut [f64]) {
         let width = self.widths[player];
         debug_assert_eq!(reach.len(), width);
-        if width == 0 {
+        // A row of zero reach sums to +0.0 in every lane.
+        if width == 0 || reach.iter().all(|&weight| weight == 0.0) {
             out.fill(0.0);
             return;
         }
@@ -307,11 +308,20 @@ mod tests {
 
     #[test]
     fn known_matchups() {
-        // Aces against kings with no shared suit.
-        let [wins, ties, losses] = outcomes(hand("AsAh"), hand("KdKc"));
-        assert_eq!(wins + ties + losses, BOARDS);
-        let equity = (wins as f64 + ties as f64 / 2.0) / BOARDS as f64;
-        assert!((equity - 0.8171).abs() < 0.001, "{equity}");
+        let equity = |first: &str, second: &str| {
+            let [wins, ties, losses] = outcomes(hand(first), hand(second));
+            assert_eq!(wins + ties + losses, BOARDS);
+            (wins as f64 + ties as f64 / 2.0) / BOARDS as f64
+        };
+        // Widely published figures: aces are a bit better than a 4-to-1
+        // favorite over kings, a small pair against two overcards is close
+        // to a coin flip, and a dominated ace wins about a quarter.
+        assert!((0.81..0.83).contains(&equity("AsAh", "KdKc")));
+        assert!((0.52..0.56).contains(&equity("2s2h", "AdKc")));
+        assert!((0.45..0.48).contains(&equity("AsKs", "QdQc")));
+        assert!((0.23..0.30).contains(&equity("AdQc", "AsKh")));
+        // Sharing suits with the kings takes away some of their flushes.
+        assert!(equity("AsAh", "KsKh") > equity("AsAh", "KdKc"));
 
         // The same hand in two suits can only tie or win by a flush.
         let [wins, ties, losses] = outcomes(hand("AsKs"), hand("AhKh"));

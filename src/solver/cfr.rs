@@ -209,7 +209,8 @@ impl std::error::Error for PolicyError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrainerError {
-    /// The tree's board is not a legal flop, turn, or river.
+    /// The tree's board is not a legal flop, turn, or river. (An empty board
+    /// is a preflop tree and is accepted.)
     Board(BoardError),
     /// The tree's nodes do not continue from its board: they reach a
     /// showdown before the river, or deal a card past the river.

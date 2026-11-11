@@ -178,6 +178,10 @@ pub enum Terminal {
     },
     /// Both players reach showdown on a complete board; the better hand wins
     /// the opponent's `invested` and a tie splits the pot.
+    ///
+    /// In a preflop tree, whose board is empty, the five board cards are
+    /// still to come: the payoff is the average of that rule over every
+    /// runout.
     Showdown {
         /// `[OOP, IP]` total contribution, in input chips.
         invested: [f64; 2],
@@ -353,9 +357,11 @@ fn validate_config(cfg: &GameConfig) -> Result<(), TreeError> {
 /// A betting tree and the board it starts from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tree {
-    /// The board the first street starts on: 3, 4, or 5 cards.
+    /// The board the first street starts on: 3, 4, or 5 cards, or none for a
+    /// preflop tree ([`build_preflop_tree`](super::build_preflop_tree)).
     pub board: Vec<Card>,
     /// The first node: OOP's first decision, unless no stack is left to bet.
+    /// In a preflop tree it is the small blind's, who is IP.
     pub root: Node,
     /// The number of decision nodes; their ids are `0..num_decision_nodes`.
     pub num_decision_nodes: usize,

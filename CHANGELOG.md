@@ -3,6 +3,26 @@
 All notable changes are listed here. The API may change in any `0.x` minor
 release; such changes are marked **Breaking**.
 
+## Unreleased
+
+Additions only. Postflop results are unchanged.
+
+- Heads-up preflop trees: `PreflopConfig` and `build_preflop_tree` build the
+  preflop betting round (blinds, limps, raise sizes as multiples of the bet,
+  all-ins, a raise cap) as a `Tree` with an empty board. `Trainer`,
+  `exploitability`, and `evaluate` work on it unchanged.
+- A `Terminal::Showdown` on an empty board is settled over every five-card
+  runout, from a shipped table of exact win and tie counts for all 47,008
+  suit-isomorphism classes of two hands. This is exact for all-ins; a call
+  with chips behind is valued as checked down. Earlier versions rejected
+  such a tree with `TrainerError::Board`.
+- `Combo::hand` names a combo's canonical hand, and `average_by_hand` folds
+  per-combo rows into the 169-hand view.
+- `ReferenceEvaluator` accepts preflop trees and enumerates every runout.
+- New error variants: `TreeError::InvalidBlinds`,
+  `TreeError::InvalidRaiseSize`, `TrainerError::PreflopAbstraction`.
+- The crate grows by about 0.6 MB for the equity table.
+
 ## 0.2.0
 
 Performance only. No public API changed, and every strategy, value, and

@@ -496,8 +496,10 @@ fn malformed_boards_ranges_and_impossible_deals_are_errors() {
         invested: [5.0, 5.0],
     });
     let ranges = [vec![combo("Ac", "Ad", 1.0)], vec![combo("Kc", "Kd", 1.0)]];
+    // An empty board is a preflop tree: the showdown runs out all five cards.
+    assert!(ReferenceEvaluator::new(&root, &[], [&ranges[0], &ranges[1]]).is_ok());
     for invalid in [
-        vec![],
+        board(&["2c"]),
         board(&["2c", "2d"]),
         board(&["2c", "2d", "2h", "2s", "3c", "3d"]),
         board(&["2c", "2c", "2h"]),
